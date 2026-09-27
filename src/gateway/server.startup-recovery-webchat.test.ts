@@ -6,8 +6,12 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import { MAIN_SESSION_RECOVERY_WORK_ADMISSION_OWNER } from "../agents/main-session-recovery/main-session-recovery-admission.js";
 import { recoverRestartAbortedMainSessions } from "../agents/main-session-recovery/main-session-restart-recovery.js";
 import { createSubagentRunRecord } from "../agents/subagent-test-fixtures.test-helpers.js";
+import { maybeWakeRequesterAfterAllChildrenSettled } from "../agents/subagents/announce/subagent-announce.requester-settle-wake.js";
+import { settleRequesterCompletionBatch } from "../agents/subagents/completion/subagent-completion-admission.store.js";
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
 import { persistSubagentRunsToDiskOrThrow } from "../agents/subagents/registry/subagent-registry-state.js";
+import { loadSubagentRunsByRunIdsFromSqlite } from "../agents/subagents/registry/subagent-registry.store.sqlite.js";
+import type { SubagentRunRecord } from "../agents/subagents/registry/subagent-registry.types.js";
 import { clearFollowupQueue, getExistingFollowupQueue } from "../auto-reply/reply/queue/state.js";
 import {
   appendTranscriptMessage,
@@ -18,12 +22,14 @@ import {
 import { resolvePhysicalSessionStorePath } from "../config/sessions/session-store-path.js";
 import { clearSessionStoreCacheForTest } from "../config/sessions/store-writer-state.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
 import {
   beginSessionWorkAdmission,
   getSessionWorkAdmissionOwnerRelease,
 } from "../sessions/session-lifecycle-admission.js";
 import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { countPendingQueueItems } from "../utils/queue-helpers.js";
+import type { GatewayRequestContext } from "./server-methods/types.js";
 import { getGatewayRecoveryRuntime } from "./server-recovery-runtime-context.js";
 import { disconnectGatewayClient, startGatewayWithClient } from "./test-helpers.e2e.js";
 import { buildMockOpenAiResponsesProvider } from "./test-openai-responses-model.js";
@@ -54,26 +60,37 @@ it(
     const afterResetMessage = "Resume only the work created after this reset.";
     const originalChildMarker = "recovery-child-before-reset";
     const currentChildMarker = "recovery-child-after-reset";
+    const batchChildMarker = "saved-batch-child";
     const afterResetRequest = createDeferred<string>();
-    const readRecoveryPrompt = (payload: string) => {
+    const readPromptFrames = (payload: string) => {
       const request: unknown = JSON.parse(payload);
       const input = isRecord(request) && Array.isArray(request.input) ? request.input : [];
-      const prompts = input.flatMap((message: unknown) => {
+      return input.flatMap((message: unknown) => {
         const content = isRecord(message) && Array.isArray(message.content) ? message.content : [];
         return content.flatMap((part: unknown) =>
-          isRecord(part) &&
-          typeof part.text === "string" &&
-          part.text.includes("Your previous turn was interrupted by a gateway restart") &&
-          part.text.includes("Unfinished child sessions to reconcile:")
-            ? [part.text]
-            : [],
+          isRecord(part) && typeof part.text === "string" ? [part.text] : [],
         );
       });
+    };
+    const readRecoveryPrompt = (payload: string) => {
+      const prompts = readPromptFrames(payload).filter(
+        (text) =>
+          text.includes("Your previous turn was interrupted by a gateway restart") &&
+          text.includes("Unfinished child sessions to reconcile:"),
+      );
+      expect(prompts).toHaveLength(1);
+      return prompts[0] ?? "";
+    };
+    const readBatchPrompt = (payload: string) => {
+      const prompts = readPromptFrames(payload).filter((text) =>
+        text.includes("[Subagent Context] Every subagent in this batch has now settled"),
+      );
       expect(prompts).toHaveLength(1);
       return prompts[0] ?? "";
     };
     const recoveryGate = createDeferred();
     const targetRequests: string[] = [];
+    const batchRequests: string[] = [];
     let holdRecovery = false;
     let providerRequestCount = 0;
     const providerServer = createServer((request, response) => {
@@ -88,6 +105,9 @@ it(
         }
         const body = Buffer.concat(chunks).toString("utf8");
         const isTitleRequest = body.includes("Generate a concise session title");
+        if (!isTitleRequest && body.includes("Every subagent in this batch has now settled")) {
+          batchRequests.push(body);
+        }
         if (
           !isTitleRequest &&
           [recoveryMessage, canceledMessage, survivorMessage, afterResetMessage].some((text) =>
@@ -114,6 +134,7 @@ it(
     let gateway: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
     let recovery: ReturnType<typeof recoverRestartAbortedMainSessions> | undefined;
     let replacementOwner: Awaited<ReturnType<typeof beginSessionWorkAdmission>> | undefined;
+    let gatewayContext: GatewayRequestContext | undefined;
 
     try {
       const storePath = state.statePath("agents", "main", "sessions", "sessions.json");
@@ -162,12 +183,25 @@ it(
         gateway: { auth: { mode: "token", token } },
         plugins: { slots: { memory: "none" } },
       } satisfies OpenClawConfig;
-      gateway = await startGatewayWithClient({
-        cfg,
-        configPath: state.configPath,
-        token,
-        clientDisplayName: "startup-recovery-webchat",
-      });
+      const kernelModule = await import("./server-kernel.js");
+      const createKernel = kernelModule.createGatewayKernel;
+      const captureKernel = vi
+        .spyOn(kernelModule, "createGatewayKernel")
+        .mockImplementation(async (...args) => {
+          const kernel = await createKernel(...args);
+          gatewayContext = kernel.gatewayRequestContext;
+          return kernel;
+        });
+      try {
+        gateway = await startGatewayWithClient({
+          cfg,
+          configPath: state.configPath,
+          token,
+          clientDisplayName: "startup-recovery-webchat",
+        });
+      } finally {
+        captureKernel.mockRestore();
+      }
       await gateway.server.startupSettled;
       const client = gateway.client;
 
@@ -226,6 +260,7 @@ it(
         });
         subagentRuns.set(child.runId, child);
         persistSubagentRunsToDiskOrThrow(subagentRuns, [child.runId]);
+        return child;
       };
       addRecoveryChild(originalChildMarker);
       const recoveryRuntime = getGatewayRecoveryRuntime();
@@ -363,6 +398,123 @@ it(
       );
       expect(resetPrompt.includes(currentChildMarker)).toBe(true);
       expect(resetPrompt.includes(originalChildMarker)).toBe(false);
+
+      const resetRunId = loadSessionEntryReadOnly({ storePath, sessionKey })?.lifecycleRunId;
+      expect(typeof resetRunId).toBe("string");
+      await expect(
+        client.request("agent.wait", { runId: resetRunId, timeoutMs: 30_000 }),
+      ).resolves.toMatchObject({ status: "ok" });
+      if (!gatewayContext) {
+        throw new Error("Saved-batch proof needs the active Gateway owner");
+      }
+      const resolver = () => gatewayContext;
+      const reloadSavedBatch = (entry: SubagentRunRecord) => {
+        subagentRuns.set(entry.runId, entry);
+        persistSubagentRunsToDiskOrThrow(subagentRuns, [entry.runId]);
+        subagentRuns.delete(entry.runId);
+        const [saved] = loadSubagentRunsByRunIdsFromSqlite([entry.runId]);
+        if (!saved) {
+          throw new Error("Saved completion batch did not survive its SQLite round trip");
+        }
+        subagentRuns.set(saved.runId, saved);
+        bindGatewayContextResolver(saved, resolver);
+        return saved;
+      };
+      const wakeSavedBatch = (entry: SubagentRunRecord) =>
+        maybeWakeRequesterAfterAllChildrenSettled({
+          requesterSessionKey: sessionKey,
+          settledEntry: entry,
+          transitionBatch: (batch, next) => {
+            for (const member of batch) {
+              member.requesterSettleWake = next;
+            }
+            persistSubagentRunsToDiskOrThrow(
+              subagentRuns,
+              batch.map((member) => member.runId),
+            );
+          },
+          completeBatch: (batch, _generation, outcome, onCommitted) => {
+            if (!outcome) {
+              throw new Error("Saved batch did not produce a delivery outcome");
+            }
+            settleRequesterCompletionBatch({
+              entries: batch.map((subagent) => ({ subagent })),
+              outcome,
+              isCurrent: () => batch.every((member) => subagentRuns.get(member.runId) === member),
+            });
+            onCommitted?.();
+          },
+        });
+      let batchChild = addRecoveryChild(batchChildMarker);
+      batchChild.expectsCompletionMessage = true;
+      batchChild.completion = { required: true, resultText: "saved interrupted batch result" };
+      batchChild.delivery = { status: "delivered" };
+      batchChild.requesterSettleWake = {
+        status: "pending",
+        attemptCount: 0,
+        batchRunIds: [batchChild.runId],
+        requesterYieldBatch: true,
+        afterRequesterYield: true,
+        rearmGeneration: 1,
+      };
+      batchChild = reloadSavedBatch(batchChild);
+      expect(await wakeSavedBatch(batchChild)).toBe(true);
+      expect(batchRequests).toHaveLength(1);
+      const ownedBatchPrompt = readBatchPrompt(batchRequests[0] ?? "");
+      expect(ownedBatchPrompt).toContain("Unfinished child sessions to reconcile:");
+      expect(ownedBatchPrompt).toContain(`"sessionKey": "${batchChild.childSessionKey}"`);
+      expect(batchChild.requesterSettleWake).toBeUndefined();
+
+      batchChild.requesterSettleWake = {
+        status: "pending",
+        attemptCount: 0,
+        batchRunIds: [batchChild.runId],
+        requesterYieldBatch: true,
+        afterRequesterYield: true,
+        rearmGeneration: 2,
+      };
+      batchChild = reloadSavedBatch(batchChild);
+      const fixtureHistory = structuredClone(batchChild);
+      await client.request("sessions.reset", { key: sessionKey });
+      const revokedTransition = vi.fn();
+      expect(
+        await maybeWakeRequesterAfterAllChildrenSettled({
+          requesterSessionKey: sessionKey,
+          settledEntry: batchChild,
+          transitionBatch: revokedTransition,
+          completeBatch: vi.fn(),
+        }),
+      ).toBe(false);
+      expect(revokedTransition).not.toHaveBeenCalled();
+      expect(batchRequests).toHaveLength(1);
+      const resetBatchParent = loadSessionEntryReadOnly({ storePath, sessionKey });
+      expect(resetBatchParent?.sessionId).toBe(fixtureHistory.completionRequesterSessionId);
+      expect(resetBatchParent?.lifecycleRevision).not.toBe(
+        fixtureHistory.completionRequesterLifecycleRevision,
+      );
+      // Current reset revoked the live wake above. This explicitly restored older
+      // fixture history exercises compatibility, not a wake left behind by reset.
+      batchChild = reloadSavedBatch(fixtureHistory);
+      expect(await wakeSavedBatch(batchChild)).toBe(true);
+      expect(batchRequests).toHaveLength(2);
+      const staleBatchPrompt = readBatchPrompt(batchRequests[1] ?? "");
+      expect(staleBatchPrompt).toContain("saved interrupted batch result");
+      expect(staleBatchPrompt).not.toContain("Unfinished child sessions to reconcile:");
+      expect(staleBatchPrompt).not.toContain(`"sessionKey": "${batchChild.childSessionKey}"`);
+      expect(staleBatchPrompt).not.toContain("parent recovery required");
+      console.log(
+        JSON.stringify({
+          proof: "saved-batch-provider-boundary",
+          currentChildActionable: ownedBatchPrompt.includes(batchChild.childSessionKey),
+          liveWakeRevokedByReset: true,
+          olderFixtureHistoryRestored: true,
+          staleChildActionable: staleBatchPrompt.includes(
+            "Unfinished child sessions to reconcile:",
+          ),
+          ordinaryResultRetained: staleBatchPrompt.includes("saved interrupted batch result"),
+          diagnosticHistoryRetained: batchRequests[1]?.includes(batchChildMarker) === true,
+        }),
+      );
     } finally {
       recoveryGate.resolve();
       replacementOwner?.release();
@@ -382,6 +534,7 @@ it(
       }
       subagentRuns.delete(originalChildMarker);
       subagentRuns.delete(currentChildMarker);
+      subagentRuns.delete(batchChildMarker);
       await state.cleanup();
     }
   },

@@ -5,6 +5,7 @@ import type {
   RunEmbeddedAgentInternalParams,
 } from "../../agents/embedded-agent-runner/run/internal-params.js";
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
+import type { AgentExecutionAuthBinding } from "../../agents/execution-auth-binding.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
@@ -52,11 +53,13 @@ export async function runEmbeddedFallbackCandidate(
 ): Promise<{
   result: Awaited<ReturnType<typeof runEmbeddedAgent>>;
   maintenanceAuthProfile?: CompletedAgentAuthSelection;
+  successfulAuthBinding?: AgentExecutionAuthBinding;
   compactionRequestBudget?: CompactionRequestBudget;
   bootstrapPromptWarningSignaturesSeen: string[];
 }> {
   const turn = params.turn;
   let maintenanceAuthProfile: CompletedAgentAuthSelection | undefined;
+  let successfulAuthBinding: AgentExecutionAuthBinding | undefined;
   let compactionRequestBudget: CompactionRequestBudget | undefined;
   const sourceReplyDeliveryRuntime = readSourceReplyDeliveryRuntime(params.candidateRun);
   const candidateRun = {
@@ -360,6 +363,9 @@ export async function runEmbeddedFallbackCandidate(
             : undefined,
         };
       };
+      embeddedRunParams.onSuccessfulAuthBinding = (binding) => {
+        successfulAuthBinding = binding;
+      };
       return runEmbeddedAgent(embeddedRunParams);
     });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);
@@ -367,6 +373,7 @@ export async function runEmbeddedFallbackCandidate(
     return {
       result,
       maintenanceAuthProfile,
+      successfulAuthBinding,
       compactionRequestBudget,
       bootstrapPromptWarningSignaturesSeen: resolveBootstrapWarningSignaturesSeen(
         result.meta?.systemPromptReport,

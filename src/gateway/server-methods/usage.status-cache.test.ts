@@ -50,6 +50,7 @@ vi.mock("../../infra/provider-usage.load.js", () => ({
 
 import {
   clearModelAuthStatusUsageCache,
+  loadCredentialUsageStatusStaleWhileRevalidate,
   readProviderUsageStaleWhileRevalidate,
 } from "./models-auth-status-usage-cache.js";
 import { getProviderUsageRuntimeSnapshot } from "./provider-usage-runtime.js";
@@ -165,6 +166,58 @@ describe("usage.status provider usage cache", () => {
       providers: Array<{ accountEmail?: string }>;
     };
     expect(result.providers[0]?.accountEmail).toBe("configured@example.com");
+  });
+
+  it("isolates session usage by credential fingerprint and removes account identity", async () => {
+    mocks.loadProviderUsageSummary.mockImplementation(async (options) => {
+      const selected = Object.keys(options.authStore?.profiles ?? {})[0];
+      return {
+        updatedAt: now,
+        providers: [
+          {
+            provider: "openai",
+            displayName: "OpenAI",
+            windows: [{ label: "5h", usedPercent: selected === "openai:plus" ? 10 : 20 }],
+            accountEmail: `${selected}@example.test`,
+          },
+        ],
+      };
+    });
+    const scoped = async (profileId: string, fingerprint: string) =>
+      await loadCredentialUsageStatusStaleWhileRevalidate({
+        agentId: "main",
+        agentDir: "agent-dir",
+        authStore: {
+          version: 1,
+          profiles: {
+            [profileId]: {
+              type: "oauth",
+              provider: "openai",
+              access: `access-${profileId}`,
+              refresh: `refresh-${profileId}`,
+              expires: 1_000_000,
+            },
+          },
+          order: { openai: [profileId] },
+        },
+        config,
+        credentialFingerprint: fingerprint,
+        providerId: "openai",
+        authScope: "personal",
+      });
+
+    const plus = await scoped("openai:plus", "fingerprint-plus");
+    const pro = await scoped("openai:pro", "fingerprint-pro");
+    await scoped("openai:plus", "fingerprint-plus");
+
+    expect(plus).toMatchObject({
+      authScope: "personal",
+      credentialFingerprint: "fingerprint-plus",
+      providers: [{ credentialFingerprint: "fingerprint-plus", windows: [{ usedPercent: 10 }] }],
+    });
+    expect(plus.providers[0]?.accountEmail).toBeUndefined();
+    expect(pro.providers[0]?.windows[0]?.usedPercent).toBe(20);
+    expect(mocks.loadProviderUsageSummary).toHaveBeenCalledTimes(2);
   });
 
   it("hands the exact runtime config to the background refresh", async () => {

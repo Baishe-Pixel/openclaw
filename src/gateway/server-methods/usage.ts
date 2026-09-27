@@ -8,7 +8,12 @@ import {
   ErrorCodes,
   errorShape,
   validateSessionsUsageParams,
+  validateUsageStatusParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { resolveApiKeyForProfile, type AuthProfileStore } from "../../agents/auth-profiles.js";
+import { readUserModelAuthProfileAsync } from "../../agents/auth-profiles/sqlite-read.js";
+import { fingerprintResolvedAuthProfileCredential } from "../../agents/execution-auth-binding.js";
+import { readSessionSuccessfulAuthBinding } from "../../agents/session-successful-auth-binding.js";
 import { sessionCreatorProfileId } from "../../config/sessions/session-entry-provenance.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { loadSessionLogs, loadSessionUsageTimeSeries } from "../../infra/session-cost-usage.js";
@@ -23,6 +28,8 @@ import type {
   SessionsUsageAggregates,
   SessionsUsageResult,
 } from "../../shared/usage-types.js";
+import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import {
   sessionDeliveryChannel,
   sessionDeliveryOrigin,
@@ -31,9 +38,14 @@ import { operatorSessionCap } from "../operator-role-policy.js";
 import { projectSessionActor } from "../session-identity-projection.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { createSessionListEntryFilter, isGatewayAdmin } from "../session-sharing.js";
+import { resolveChatMetadataReadParams } from "./chat-metadata-handler.js";
 import { gatewayClientSessionCreator } from "./gateway-client-identity.js";
-import { loadUsageStatusStaleWhileRevalidate } from "./models-auth-status-usage-cache.js";
-import type { GatewayRequestHandlers, RespondFn } from "./types.js";
+import {
+  loadCredentialUsageStatusStaleWhileRevalidate,
+  loadUsageStatusStaleWhileRevalidate,
+} from "./models-auth-status-usage-cache.js";
+import { getProviderUsageRuntimeSnapshot } from "./provider-usage-runtime.js";
+import type { GatewayRequestHandlerOptions, GatewayRequestHandlers, RespondFn } from "./types.js";
 import {
   formatDateLabel,
   resolveDateInterpretation,
@@ -158,8 +170,106 @@ function projectUsageCreator(
   return { key, ...(projected ? { actor: projected } : {}) };
 }
 
+async function loadSessionCredentialUsage(
+  options: GatewayRequestHandlerOptions,
+  coldRead: "refresh-marker" | undefined,
+) {
+  const scope = resolveChatMetadataReadParams(options, {
+    sessionKey: normalizeOptionalString(options.params.sessionKey),
+  });
+  if (!scope) {
+    return undefined;
+  }
+  try {
+    const config = options.context.getRuntimeConfig();
+    const successful = scope.sessionKey
+      ? readSessionSuccessfulAuthBinding({
+          sessionKey: scope.sessionKey,
+          sessionId: scope.sessionEntry?.sessionId,
+          lifecycleRevision: scope.sessionEntry?.lifecycleRevision,
+          provider: scope.sessionEntry?.modelProvider,
+          model: scope.sessionEntry?.model,
+        })
+      : undefined;
+    if (!successful) {
+      scope.assertCurrent?.();
+      return { updatedAt: Date.now(), providers: [] };
+    }
+    const profileId = successful.authProfileId;
+
+    const runtime = getProviderUsageRuntimeSnapshot({
+      config,
+      agentId: scope.agentId,
+    });
+    const personal = isUserModelAuthProfileId(profileId);
+    const credential = personal
+      ? (await readUserModelAuthProfileAsync(profileId, captureOpenClawStateWorkerContext()))
+          ?.credential
+      : runtime.store.profiles[profileId];
+    if (!credential) {
+      scope.assertCurrent?.();
+      return { updatedAt: Date.now(), providers: [] };
+    }
+    const providerId = successful.provider;
+    if (credential.provider.trim() !== providerId) {
+      scope.assertCurrent?.();
+      return { updatedAt: Date.now(), providers: [] };
+    }
+    const authStore: AuthProfileStore = {
+      version: runtime.store.version,
+      profiles: { [profileId]: credential },
+      order: { [providerId]: [profileId] },
+      lastGood: { [providerId]: profileId },
+    };
+    const resolvedProfile = await resolveApiKeyForProfile({
+      cfg: config,
+      store: authStore,
+      profileId,
+      agentDir: runtime.agentDir,
+      allowProfileFallback: false,
+    });
+    if (!resolvedProfile || resolvedProfile.profileId !== profileId) {
+      scope.assertCurrent?.();
+      return { updatedAt: Date.now(), providers: [] };
+    }
+    const resolvedAuth = {
+      apiKey: resolvedProfile.apiKey,
+      profileId,
+      source: `profile:${profileId}`,
+      mode: credential.type === "api_key" ? "api-key" : credential.type,
+    } as const;
+    const credentialFingerprint = fingerprintResolvedAuthProfileCredential({
+      profileId,
+      credential,
+      resolvedAuth,
+    });
+    if (!credentialFingerprint || credentialFingerprint !== successful.authFingerprint) {
+      scope.assertCurrent?.();
+      return { updatedAt: Date.now(), providers: [] };
+    }
+    const summary = await loadCredentialUsageStatusStaleWhileRevalidate({
+      agentId: scope.agentId,
+      agentDir: runtime.agentDir,
+      authStore,
+      config,
+      credentialFingerprint: successful.authFingerprint,
+      providerId,
+      authScope: personal ? "personal" : "shared",
+      coldRead,
+    });
+    scope.assertCurrent?.();
+    return summary;
+  } finally {
+    scope.release?.();
+  }
+}
+
 export const usageHandlers: GatewayRequestHandlers = {
-  "usage.status": async ({ respond, context, client }) => {
+  "usage.status": async (options) => {
+    const { respond, context, client, params } = options;
+    if (!assertValidParams(params, validateUsageStatusParams, "usage.status", respond)) {
+      return;
+    }
     // Only clients with bounded retry machinery may receive an incomplete cold result.
     // In-process dispatch reuses the originating request's client, capabilities
     // included, so a plugin proxying this method inside a capable UI request
@@ -171,10 +281,15 @@ export const usageHandlers: GatewayRequestHandlers = {
     )
       ? ("refresh-marker" as const)
       : undefined;
-    const summary = await loadUsageStatusStaleWhileRevalidate({
-      config: context.getRuntimeConfig(),
-      coldRead,
-    });
+    const summary = params.sessionKey
+      ? await loadSessionCredentialUsage(options, coldRead)
+      : await loadUsageStatusStaleWhileRevalidate({
+          config: context.getRuntimeConfig(),
+          coldRead,
+        });
+    if (!summary) {
+      return;
+    }
     respond(true, summary, undefined);
   },
   "usage.cost": async ({ respond, params, context, client }) => {

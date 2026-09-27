@@ -700,6 +700,11 @@ export const SessionsUsageParamsSchema = closedObject({
   includeContextWeight: Type.Optional(Type.Boolean()),
 });
 
+/** Provider quota query, optionally bound to the credential that served one visible session. */
+export const UsageStatusParamsSchema = closedObject({
+  sessionKey: Type.Optional(NonEmptyString),
+});
+
 // Wire types derive directly from local schema consts so public d.ts graphs never
 // pull in the ProtocolSchemas registry.
 export type SessionsCleanupParams = Static<typeof SessionsCleanupParamsSchema>;
@@ -760,6 +765,7 @@ export type SessionsGroupsDeleteParams = Static<typeof SessionsGroupsDeleteParam
 export type SessionsGroupsMutationResult = Static<typeof SessionsGroupsMutationResultSchema>;
 export type SessionsCompactParams = Static<typeof SessionsCompactParamsSchema>;
 export type SessionsUsageParams = Static<typeof SessionsUsageParamsSchema>;
+export type UsageStatusParams = Static<typeof UsageStatusParamsSchema>;
 export type SessionFileContentEncoding = Static<typeof SessionFileContentEncodingSchema>;
 export type SessionFileKind = Static<typeof SessionFileKindSchema>;
 export type SessionFilePreviewKind = Static<typeof SessionFilePreviewKindSchema>;

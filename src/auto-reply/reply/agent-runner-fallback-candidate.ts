@@ -225,6 +225,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
         });
         clearAgentRunTerminalWriteContext(params.preparedRunAdmission.operationalRunInstance);
         params.state.maintenanceAuthProfile = undefined;
+        params.state.successfulAuthBinding = undefined;
         params.state.compactionRequestBudget = undefined;
         invalidateTurnCompactionContext(params.state.compaction);
         params.state.attemptedRuntimeProvider = provider;
@@ -333,6 +334,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
             });
             params.state.bootstrapPromptWarningSignaturesSeen =
               candidate.bootstrapPromptWarningSignaturesSeen;
+            params.state.successfulAuthBinding = candidate.successfulAuthBinding;
             return candidate.result;
           }
           const candidate = await runEmbeddedFallbackCandidate({
@@ -357,6 +359,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
           params.state.bootstrapPromptWarningSignaturesSeen =
             candidate.bootstrapPromptWarningSignaturesSeen;
           params.state.maintenanceAuthProfile = candidate.maintenanceAuthProfile;
+          params.state.successfulAuthBinding = candidate.successfulAuthBinding;
           params.state.compactionRequestBudget = candidate.compactionRequestBudget;
           return candidate.result;
         } finally {

@@ -291,6 +291,7 @@ export {
   SessionsGroupsMutationResultSchema,
   SessionsCompactParamsSchema,
   SessionsUsageParamsSchema,
+  UsageStatusParamsSchema,
   SessionDiscussionStateSchema,
   SessionDiscussionInfoSchema,
   SessionDiscussionInfoParamsSchema,

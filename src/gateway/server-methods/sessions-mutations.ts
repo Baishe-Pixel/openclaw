@@ -14,6 +14,7 @@ import {
   validateSessionsPluginPatchParams,
   validateSessionsResetParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { invalidateSessionSuccessfulAuthBinding } from "../../agents/session-successful-auth-binding.js";
 import {
   assignSessionOwner,
   updateSessionProfileInvolvement,
@@ -573,6 +574,7 @@ export const sessionMutationHandlers: GatewayRequestHandlers = {
       respond(false, undefined, result.error);
       return;
     }
+    invalidateSessionSuccessfulAuthBinding(result.key);
     if ("incognitoDeleted" in result) {
       respond(true, { ok: true, key: result.key, deleted: true }, undefined);
       emitSessionsChanged(context, {

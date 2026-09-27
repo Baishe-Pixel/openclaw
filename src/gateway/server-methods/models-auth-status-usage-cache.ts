@@ -32,6 +32,7 @@ type ProviderUsageCacheIdentity = {
 };
 
 type ProviderUsageCacheEntry = ProviderUsageCacheIdentity & {
+  agentId: string;
   refreshedAt: number;
   summary: UsageSummary;
   usageByProvider: Map<string, ProviderUsageStatus>;
@@ -41,14 +42,15 @@ type ProviderUsageRefresh = ProviderUsageCacheIdentity & {
   promise: Promise<UsageSummary>;
 };
 
-const usageCacheByAgentId = new Map<string, ProviderUsageCacheEntry>();
-const usageRefreshByAgentId = new Map<string, ProviderUsageRefresh>();
+const usageCacheByCredential = new Map<string, ProviderUsageCacheEntry>();
+const usageRefreshByCredential = new Map<string, ProviderUsageRefresh>();
+const MAX_CREDENTIAL_CACHE_ENTRIES_PER_AGENT = 8;
 let cacheGeneration = 0;
 
 export function clearModelAuthStatusUsageCache(): void {
   cacheGeneration += 1;
-  usageCacheByAgentId.clear();
-  usageRefreshByAgentId.clear();
+  usageCacheByCredential.clear();
+  usageRefreshByCredential.clear();
   clearProviderUsageRuntimeSnapshot();
 }
 
@@ -86,6 +88,17 @@ function mapProviderUsage(usage: Awaited<ReturnType<typeof loadProviderUsageSumm
   return usageByProvider;
 }
 
+function publishProviderUsageCache(cacheKey: string, entry: ProviderUsageCacheEntry): void {
+  usageCacheByCredential.delete(cacheKey);
+  usageCacheByCredential.set(cacheKey, entry);
+  const siblings = [...usageCacheByCredential].filter(
+    ([, candidate]) => candidate.agentId === entry.agentId,
+  );
+  for (const [oldestKey] of siblings.slice(0, -MAX_CREDENTIAL_CACHE_ENTRIES_PER_AGENT)) {
+    usageCacheByCredential.delete(oldestKey);
+  }
+}
+
 function retainLastGoodOnTimeout(
   summary: UsageSummary,
   lastGood: UsageSummary | undefined,
@@ -118,9 +131,12 @@ function scheduleProviderUsageRefresh(
     authStore?: AuthProfileStore;
     providerIds: UsageProviderId[];
     lastGood?: UsageSummary;
+    resultCredentialFingerprint?: string;
+    authScope?: "personal" | "shared";
   },
 ): Promise<UsageSummary> {
-  const active = usageRefreshByAgentId.get(params.agentId);
+  const cacheKey = JSON.stringify([params.agentId, params.credentialKey, params.providerKey]);
+  const active = usageRefreshByCredential.get(cacheKey);
   if (
     active?.agentDir === params.agentDir &&
     active.configRef === params.configRef &&
@@ -140,12 +156,26 @@ function scheduleProviderUsageRefresh(
       timeoutMs: PROVIDER_USAGE_TIMEOUT_MS,
     })
       .then((freshUsage) => {
-        const usage = retainLastGoodOnTimeout(freshUsage, params.lastGood);
+        const scopedUsage = params.resultCredentialFingerprint
+          ? {
+              ...freshUsage,
+              authScope: params.authScope,
+              credentialFingerprint: params.resultCredentialFingerprint,
+              providers: freshUsage.providers.map(
+                ({ accountEmail: _accountEmail, ...provider }) => ({
+                  ...provider,
+                  credentialFingerprint: params.resultCredentialFingerprint,
+                }),
+              ),
+            }
+          : freshUsage;
+        const usage = retainLastGoodOnTimeout(scopedUsage, params.lastGood);
         if (
           publishGeneration === cacheGeneration &&
-          usageRefreshByAgentId.get(params.agentId) === refresh
+          usageRefreshByCredential.get(cacheKey) === refresh
         ) {
-          usageCacheByAgentId.set(params.agentId, {
+          publishProviderUsageCache(cacheKey, {
+            agentId: params.agentId,
             agentDir: params.agentDir,
             configRef: params.configRef,
             credentialKey: params.credentialKey,
@@ -167,8 +197,8 @@ function scheduleProviderUsageRefresh(
         throw err;
       })
       .finally(() => {
-        if (usageRefreshByAgentId.get(params.agentId) === refresh) {
-          usageRefreshByAgentId.delete(params.agentId);
+        if (usageRefreshByCredential.get(cacheKey) === refresh) {
+          usageRefreshByCredential.delete(cacheKey);
         }
       }),
   );
@@ -179,7 +209,7 @@ function scheduleProviderUsageRefresh(
     providerKey: params.providerKey,
     promise,
   };
-  usageRefreshByAgentId.set(params.agentId, refresh);
+  usageRefreshByCredential.set(cacheKey, refresh);
   return promise;
 }
 
@@ -193,13 +223,16 @@ type ProviderUsageCacheParams = {
   forceRefresh?: boolean;
   providerIds: UsageProviderId[];
   now: number;
+  resultCredentialFingerprint?: string;
+  authScope?: "personal" | "shared";
 };
 
 function resolveProviderUsageCacheRead(params: ProviderUsageCacheParams) {
   const providerIds = params.providerIds.toSorted();
   const providerKey = providerIds.join("\0");
   const credentialKey = scopeProviderUsageCredentialKey(params.credentialKey, providerIds);
-  const cached = usageCacheByAgentId.get(params.agentId);
+  const cacheKey = JSON.stringify([params.agentId, credentialKey, providerKey]);
+  const cached = usageCacheByCredential.get(cacheKey);
   const matching =
     cached?.agentDir === params.agentDir &&
     cached.configRef === params.configRef &&
@@ -223,6 +256,8 @@ function resolveProviderUsageCacheRead(params: ProviderUsageCacheParams) {
       providerIds,
       providerKey,
       lastGood: matching?.summary,
+      resultCredentialFingerprint: params.resultCredentialFingerprint,
+      authScope: params.authScope,
     },
   };
 }
@@ -231,7 +266,6 @@ export function readProviderUsageStaleWhileRevalidate(
   params: ProviderUsageCacheParams,
 ): Map<string, ProviderUsageStatus> {
   if (params.providerIds.length === 0) {
-    usageCacheByAgentId.delete(params.agentId);
     return new Map();
   }
   const { matching, needsRefresh, refreshParams } = resolveProviderUsageCacheRead(params);
@@ -261,7 +295,6 @@ export async function loadUsageStatusStaleWhileRevalidate(options: {
     now: options.now ?? Date.now(),
   };
   if (params.providerIds.length === 0) {
-    usageCacheByAgentId.delete(params.agentId);
     return { updatedAt: params.now, providers: [] };
   }
   const { matching, needsRefresh, refreshParams } = resolveProviderUsageCacheRead(params);
@@ -278,4 +311,54 @@ export async function loadUsageStatusStaleWhileRevalidate(options: {
   }
   void refresh.catch(() => {});
   return { updatedAt: params.now, providers: [], refreshing: true };
+}
+
+/** Load usage for one already-authorized, exact credential without consulting global order. */
+export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
+  agentId: string;
+  agentDir: string;
+  authStore: AuthProfileStore;
+  config: OpenClawConfig;
+  credentialFingerprint: string;
+  providerId: UsageProviderId;
+  authScope: "personal" | "shared";
+  coldRead?: "refresh-marker";
+  now?: number;
+}): Promise<UsageSummary> {
+  const now = options.now ?? Date.now();
+  const params: ProviderUsageCacheParams = {
+    agentId: options.agentId,
+    agentDir: options.agentDir,
+    authStore: options.authStore,
+    configRef: options.config,
+    credentialKey: JSON.stringify({
+      profiles: [[options.providerId, options.credentialFingerprint]],
+      direct: [],
+    }),
+    providerIds: [options.providerId],
+    coldRead: options.coldRead,
+    now,
+    resultCredentialFingerprint: options.credentialFingerprint,
+    authScope: options.authScope,
+  };
+  const { matching, needsRefresh, refreshParams } = resolveProviderUsageCacheRead(params);
+  if (matching && !needsRefresh) {
+    return matching.summary;
+  }
+  const refresh = scheduleProviderUsageRefresh(refreshParams);
+  if (matching) {
+    void refresh.catch(() => {});
+    return matching.summary;
+  }
+  if (options.coldRead !== "refresh-marker") {
+    return await refresh;
+  }
+  void refresh.catch(() => {});
+  return {
+    updatedAt: now,
+    providers: [],
+    refreshing: true,
+    authScope: options.authScope,
+    credentialFingerprint: options.credentialFingerprint,
+  };
 }

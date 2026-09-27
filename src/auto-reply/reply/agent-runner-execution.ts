@@ -21,6 +21,7 @@ import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-erro
 import { leaseMcpAppModelContextForTurn } from "../../agents/mcp-app-model-context.js";
 import { resolveReplyExpectation } from "../../agents/reply-completion.js";
 import { createAgentPatchedSessionModelRunGuard } from "../../agents/session-model-auto-revert.js";
+import { recordSessionSuccessfulAuthBinding } from "../../agents/session-successful-auth-binding.js";
 import { readChannelContextGatewayContextResolver } from "../../channels/message-access/admission-evidence.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
@@ -459,6 +460,7 @@ async function executeAgentTurnInternalLoop(
   return {
     kind: "completed",
     maintenanceAuthProfile: fallbackCycleState.maintenanceAuthProfile,
+    successfulAuthBinding: fallbackCycleState.successfulAuthBinding,
     compactionRequestBudget: fallbackCycleState.compactionRequestBudget,
     result: runResult,
     fallbackProvider,
@@ -638,11 +640,26 @@ async function executeAgentTurnOutcome(params: AgentTurnParams): Promise<AgentTu
             : {}),
         }
       : { status: "ok" as const };
+    if (terminalStatus.status === "ok") {
+      const entry = executionParams.getActiveSessionEntry();
+      recordSessionSuccessfulAuthBinding({
+        sessionKey: executionParams.sessionKey ?? executionParams.followupRun.run.sessionKey,
+        sessionId: entry?.sessionId,
+        lifecycleRevision: entry?.lifecycleRevision,
+        provider,
+        model,
+        binding:
+          internal.successfulAuthBinding?.modelId === model
+            ? internal.successfulAuthBinding
+            : undefined,
+      });
+    }
     return {
       runId,
       outcome: {
         kind: "settled",
         maintenanceAuthProfile: internal.maintenanceAuthProfile,
+        successfulAuthBinding: internal.successfulAuthBinding,
         compactionRequestBudget: internal.compactionRequestBudget,
         ...terminalStatus,
         result: internal.result,

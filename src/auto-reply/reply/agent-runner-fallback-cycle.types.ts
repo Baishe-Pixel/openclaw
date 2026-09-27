@@ -2,6 +2,7 @@ import type { PreparedAgentRunAdmission } from "../../agents/admitted-run-contex
 import type { BootstrapContextRunKind } from "../../agents/bootstrap-mode.js";
 import type { DeferredEmbeddedRunLifecycleManager } from "../../agents/embedded-agent-runner/run/deferred-lifecycle-owner.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
+import type { AgentExecutionAuthBinding } from "../../agents/execution-auth-binding.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
 import type { ContextEngineLogicalTurnLease } from "../../agents/harness/context-engine-logical-turn.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
@@ -63,6 +64,7 @@ export type AgentFallbackCandidateCommonParams = {
 
 export type AgentFallbackCycleState = {
   maintenanceAuthProfile?: CompletedAgentAuthSelection;
+  successfulAuthBinding?: AgentExecutionAuthBinding;
   compactionRequestBudget?: CompactionRequestBudget;
   deferredLifecycle: DeferredEmbeddedRunLifecycleManager;
   lifecycleGeneration: string;

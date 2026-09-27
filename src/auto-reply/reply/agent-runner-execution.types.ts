@@ -1,5 +1,6 @@
 import type { CompactionAccountingFact } from "../../agents/embedded-agent-runner/run/internal-params.js";
 import type { runEmbeddedAgent } from "../../agents/embedded-agent.js";
+import type { AgentExecutionAuthBinding } from "../../agents/execution-auth-binding.js";
 import type { FailoverReason } from "../../agents/failover/signal.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
 import type { SessionEntry } from "../../config/sessions.js";
@@ -54,6 +55,7 @@ export type AgentTurnInternalResult =
   | {
       kind: "completed";
       maintenanceAuthProfile?: CompletedAgentAuthSelection;
+      successfulAuthBinding?: AgentExecutionAuthBinding;
       compactionRequestBudget?: CompactionRequestBudget;
       result: Awaited<ReturnType<typeof runEmbeddedAgent>>;
       fallbackProvider?: string;
@@ -80,6 +82,7 @@ export type AgentTurnInternalResult =
 type SettledAgentTurnBase = {
   kind: "settled";
   maintenanceAuthProfile?: CompletedAgentAuthSelection;
+  successfulAuthBinding?: AgentExecutionAuthBinding;
   compactionRequestBudget?: CompactionRequestBudget;
   result: Awaited<ReturnType<typeof runEmbeddedAgent>>;
   resolved: { provider: string; model: string };

@@ -376,6 +376,7 @@ export const validateSessionsBranchesSwitchParams = compile(S.SessionsBranchesSw
 export const validateSessionsRewindParams = compile(S.SessionsRewindParamsSchema);
 export const validateSessionsForkParams = compile(S.SessionsForkParamsSchema);
 export const validateSessionsUsageParams = compile(S.SessionsUsageParamsSchema);
+export const validateUsageStatusParams = compile(S.UsageStatusParamsSchema);
 export const validateSessionDiscussionInfoParams = compile(S.SessionDiscussionInfoParamsSchema);
 export const validateSessionDiscussionInfoResult = compile(S.SessionDiscussionInfoResultSchema);
 export const validateSessionDiscussionOpenParams = compile(S.SessionDiscussionOpenParamsSchema);

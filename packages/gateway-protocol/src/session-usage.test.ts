@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { validateSessionsUsageParams } from "./index.js";
+import { validateSessionsUsageParams, validateUsageStatusParams } from "./index.js";
 
 test("sessions.usage accepts time zones and opaque creator selectors", () => {
   for (const params of [
@@ -17,4 +17,11 @@ test("sessions.usage accepts time zones and opaque creator selectors", () => {
   ]) {
     expect(validateSessionsUsageParams(params)).toBe(false);
   }
+});
+
+test("usage.status accepts only legacy empty params or a session key", () => {
+  expect(validateUsageStatusParams({})).toBe(true);
+  expect(validateUsageStatusParams({ sessionKey: "agent:main:main" })).toBe(true);
+  expect(validateUsageStatusParams({ sessionKey: "" })).toBe(false);
+  expect(validateUsageStatusParams({ authProfileId: "private" })).toBe(false);
 });

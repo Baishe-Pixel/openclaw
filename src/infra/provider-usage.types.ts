@@ -75,6 +75,8 @@ export type ProviderUsageSnapshot = {
   plan?: string;
   /** Account identity (email) the usage was fetched under, when known. */
   accountEmail?: string;
+  /** Process-local, non-reversible identity of the credential used for this snapshot. */
+  credentialFingerprint?: string;
   error?: string;
 };
 
@@ -83,6 +85,9 @@ export type UsageSummary = {
   providers: ProviderUsageSnapshot[];
   /** A background refresh owns the real values; an empty list is incomplete. */
   refreshing?: boolean;
+  /** Credential scope for a session-bound query; absent on the legacy global query. */
+  authScope?: "personal" | "shared";
+  credentialFingerprint?: string;
 };
 
 /** Normalized provider id. Usage providers are discovered from plugin hooks at runtime. */

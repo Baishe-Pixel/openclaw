@@ -15,7 +15,6 @@ import {
 } from "../../agents/cli-session.js";
 import { resolveDelegationCapability } from "../../agents/delegation-capability.js";
 import type { EmbeddedAgentRunResult } from "../../agents/embedded-agent-runner/types.js";
-import type { AgentExecutionAuthBinding } from "../../agents/execution-auth-binding.js";
 import {
   getGeneratedMediaTaskIdsForSessionKey,
   hasNewGeneratedMediaTaskForSessionKey,
@@ -54,11 +53,9 @@ export async function runCliFallbackCandidate(
   },
 ): Promise<{
   result: Awaited<ReturnType<typeof runCliAgentWithLifecycle>>;
-  successfulAuthBinding?: AgentExecutionAuthBinding;
   bootstrapPromptWarningSignaturesSeen: string[];
 }> {
   const turn = params.turn;
-  let successfulAuthBinding: AgentExecutionAuthBinding | undefined;
   const onPreparedBlockReply = turn.opts?.onPreparedBlockReply;
   const onNativeBlockReply =
     turn.opts?.onBlockReply ??
@@ -475,9 +472,6 @@ export async function runCliFallbackCandidate(
             onPartialReply: turn.opts?.onPartialReply,
             onExecutionPhase: params.signalExecutionPhaseForTyping,
             replyOperation: turn.replyOperation,
-            onSuccessfulAuthBinding: (binding) => {
-              successfulAuthBinding = binding;
-            },
           },
         });
         if (droppedCliSessionReplacement) {
@@ -531,7 +525,6 @@ export async function runCliFallbackCandidate(
   );
   return {
     result,
-    successfulAuthBinding,
     bootstrapPromptWarningSignaturesSeen: resolveBootstrapWarningSignaturesSeen(
       result.meta?.systemPromptReport,
     ),

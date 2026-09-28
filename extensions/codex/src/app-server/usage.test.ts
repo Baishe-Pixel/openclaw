@@ -21,6 +21,7 @@ function usageContext(
 describe("Codex app-server provider usage", () => {
   it("contributes OpenAI usage windows for the synthetic app-server credential", async () => {
     const signal = new AbortController().signal;
+    const assertCurrent = vi.fn();
     const readUsage = vi.fn(async () => ({
       rateLimits: {
         rateLimitsByLimitId: {
@@ -38,7 +39,7 @@ describe("Codex app-server provider usage", () => {
     }));
 
     await expect(
-      fetchCodexAppServerUsageSnapshot(usageContext({ signal }), { readUsage }),
+      fetchCodexAppServerUsageSnapshot(usageContext({ signal, assertCurrent }), { readUsage }),
     ).resolves.toEqual({
       provider: "openai",
       displayName: "OpenAI",
@@ -46,6 +47,10 @@ describe("Codex app-server provider usage", () => {
       plan: undefined,
       accountEmail: "codex-account@example.com",
     });
+    expect(assertCurrent).toHaveBeenCalledOnce();
+    expect(assertCurrent.mock.invocationCallOrder[0]).toBeLessThan(
+      readUsage.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
     expect(readUsage).toHaveBeenCalledWith({
       timeoutMs: 3_500,
       signal,
@@ -56,6 +61,19 @@ describe("Codex app-server provider usage", () => {
         commandSource: "managed",
       }),
     });
+  });
+
+  it("rejects a revoked live grant before the custom transport sends", async () => {
+    const readUsage = vi.fn();
+    const assertCurrent = vi.fn(() => {
+      throw new Error("grant revoked");
+    });
+
+    await expect(
+      fetchCodexAppServerUsageSnapshot(usageContext({ assertCurrent }), { readUsage }),
+    ).rejects.toThrow("grant revoked");
+    expect(assertCurrent).toHaveBeenCalledOnce();
+    expect(readUsage).not.toHaveBeenCalled();
   });
 
   it("ignores ordinary OpenAI credentials", async () => {

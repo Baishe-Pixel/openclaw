@@ -589,7 +589,7 @@ export type PluginRuntimeCore = {
       workspaceDir?: string;
     }) => Promise<import("./model-auth-types.js").ResolvedProviderRuntimeAuth>;
     /** Read sanitized provider usage for one exact accepted reply run. */
-    getReplyUsage: (params: {
+    getReplyUsage?: (params: {
       runId: string;
       sessionKey: string;
       sessionId: string;

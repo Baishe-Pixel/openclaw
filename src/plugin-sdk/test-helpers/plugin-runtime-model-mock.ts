@@ -37,7 +37,7 @@ export function createPluginModelRuntimeMock(
       ),
       getApiKeyForModel: vi.fn<PluginRuntime["modelAuth"]["getApiKeyForModel"]>(),
       getRuntimeAuthForModel: vi.fn<PluginRuntime["modelAuth"]["getRuntimeAuthForModel"]>(),
-      getReplyUsage: vi.fn<PluginRuntime["modelAuth"]["getReplyUsage"]>(),
+      getReplyUsage: vi.fn<NonNullable<PluginRuntime["modelAuth"]["getReplyUsage"]>>(),
       resolveApiKeyForProvider: vi.fn<PluginRuntime["modelAuth"]["resolveApiKeyForProvider"]>(),
     },
     llm: {

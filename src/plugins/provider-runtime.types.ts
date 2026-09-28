@@ -209,6 +209,11 @@ export type ProviderResolvedUsageAuth = ProviderUsageAuthToken | { handled: true
 export type ProviderFetchUsageSnapshotContext = {
   /** Custom transports must preserve this signal; fetchFn already includes it. */
   signal?: AbortSignal;
+  /**
+   * Live host authority. Custom transports MUST call this immediately before
+   * their final provider I/O; the supplied fetchFn performs the same check.
+   */
+  assertCurrent?: () => void;
   config: OpenClawConfig;
   agentDir?: string;
   workspaceDir?: string;

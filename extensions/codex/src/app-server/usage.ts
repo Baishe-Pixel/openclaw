@@ -27,6 +27,9 @@ export async function fetchCodexAppServerUsageSnapshot(
     return null;
   }
   const appServer = resolveCodexAppServerRuntimeOptions({ pluginConfig: options.pluginConfig });
+  // This app-server route is a custom transport and does not use ctx.fetchFn.
+  // Revalidate the host-held grant at its own final I/O boundary.
+  ctx.assertCurrent?.();
   const usage = await (options.readUsage ?? readCodexAppServerUsage)({
     timeoutMs: ctx.timeoutMs,
     signal: ctx.signal,

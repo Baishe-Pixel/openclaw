@@ -169,6 +169,40 @@ describe("provider-usage.load plugin boundary", () => {
     ]);
   });
 
+  it("carries live authority into a provider-owned custom transport", async () => {
+    const assertCurrent = vi.fn();
+    const customSend = vi.fn();
+    resolveProviderUsageSnapshotWithPluginMock.mockImplementationOnce(async (params: unknown) => {
+      if (!params || typeof params !== "object" || Array.isArray(params)) {
+        throw new Error("expected plugin params");
+      }
+      const context = (params as { context?: { assertCurrent?: () => void } }).context;
+      context?.assertCurrent?.();
+      customSend();
+      return {
+        provider: "openai",
+        displayName: "OpenAI",
+        windows: [{ label: "5h", usedPercent: 4 }],
+      };
+    });
+
+    await expect(
+      loadProviderUsageSummary({
+        now: usageNow,
+        auth: [{ provider: "openai", token: "codex-token" }],
+        fetch: vi.fn() as unknown as typeof fetch,
+        env: {},
+        assertCurrent,
+      }),
+    ).resolves.toMatchObject({ providers: [{ provider: "openai" }] });
+
+    expect(assertCurrent).toHaveBeenCalledTimes(2);
+    expect(assertCurrent.mock.invocationCallOrder[1]).toBeLessThan(
+      customSend.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(customSend).toHaveBeenCalledOnce();
+  });
+
   it("routes synthetic Codex usage through the Codex hook while preserving OpenAI context", async () => {
     resolveProviderUsageSnapshotWithPluginMock.mockResolvedValueOnce({
       provider: "openai",

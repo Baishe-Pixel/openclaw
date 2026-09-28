@@ -246,6 +246,15 @@ Backend adapters retain protocol validation and special-mode handling.
     });
     ```
 
+    `getReplyUsage(...)` is a narrow, reply-bound quota helper for plugins that render
+    status for the same accepted reply. Feature-detect it because older hosts omit the
+    method. Callers must provide the exact host-issued `runId`, `sessionKey`, `sessionId`,
+    `agentId`, provider, and model from that reply hook; caller-supplied profile IDs are
+    not accepted. The host resolves only the successful shared credential, strips
+    account identity and secret material, and fails closed when the run or credential
+    changed. Personal auth profiles are not supported: run provenance is not current
+    owner/admin authority, so personal quota remains on the authorized Gateway path.
+
   </Accordion>
 </AccordionGroup>
 

@@ -155,9 +155,18 @@ when authentication shares the request budget, and call its `cleanup` in
     Both usage hooks receive an optional `ctx.signal` for collection cancellation.
     `ctx.fetchFn` already combines it with request cancellation; custom transports
     must forward `ctx.signal` to their I/O. Check cancellation before starting
-    additional auth work after an await. An exhausted budget invokes neither hook
-    and produces a visible `Timeout` snapshot. Core retains completed siblings and
-    tracks unfinished work through cleanup, including auth-owned credential refresh.
+    additional auth work after an await.
+
+    A credential-scoped call can also supply `ctx.assertCurrent`. The host-provided
+    `ctx.fetchFn` invokes it immediately before every network send. A custom transport
+    that does not use `ctx.fetchFn` **must** invoke `ctx.assertCurrent?.()` after any
+    awaited preparation and immediately before its final provider I/O. Do not serialize,
+    cache, or reuse the callback; an exception means the transport must send nothing.
+    Older hosts can omit this additive field.
+
+    An exhausted budget invokes neither hook and produces a visible `Timeout` snapshot.
+    Core retains completed siblings and tracks unfinished work through cleanup, including
+    auth-owned credential refresh.
 
     `resolveUsageAuth` has three outcomes. Return
     `{ token, accountId?, subscriptionType?, rateLimitTier? }` when the

@@ -46,6 +46,7 @@ async function fetchProviderUsageSnapshot(params: {
   timeoutMs: number;
   signal: AbortSignal;
   fetchFn: typeof fetch;
+  assertCurrent?: () => void;
 }): Promise<ProviderUsageSnapshot> {
   const pluginSnapshot = await resolveProviderUsageSnapshotWithPlugin({
     provider: params.auth.hookProvider ?? params.auth.provider,
@@ -67,6 +68,7 @@ async function fetchProviderUsageSnapshot(params: {
       email: params.auth.email,
       timeoutMs: params.timeoutMs,
       signal: params.signal,
+      assertCurrent: params.assertCurrent,
       fetchFn: params.fetchFn,
     },
   });
@@ -162,6 +164,7 @@ export async function loadProviderUsageSummary(
             workspaceDir: opts.workspaceDir,
             timeoutMs,
             signal,
+            assertCurrent: opts.assertCurrent,
             fetchFn: (input, init) => {
               signal.throwIfAborted();
               opts.assertCurrent?.();

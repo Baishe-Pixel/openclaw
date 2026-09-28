@@ -8,6 +8,7 @@ import {
   saveAuthProfileStore,
   type AuthProfileStore,
 } from "../../agents/auth-profiles.js";
+import { fingerprintAuthAccountIdentity } from "../../agents/execution-auth-binding.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { UsageSummary } from "../../infra/provider-usage.types.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
@@ -164,8 +165,10 @@ describe("usage.status provider usage cache", () => {
     // carries the snapshot the exact-config loader produced.
     const result = (await runUsageStatus()) as {
       providers: Array<{ accountEmail?: string }>;
+      sessionScope?: unknown;
     };
     expect(result.providers[0]?.accountEmail).toBe("configured@example.com");
+    expect(result.sessionScope).toBeUndefined();
   });
 
   it("isolates session usage by credential fingerprint and removes account identity", async () => {
@@ -200,8 +203,16 @@ describe("usage.status provider usage cache", () => {
           },
           order: { openai: [profileId] },
         },
+        exactAuth: {
+          provider: "openai",
+          token: `access-${profileId}`,
+          authProfileId: profileId,
+        },
         config,
         credentialFingerprint: fingerprint,
+        sessionKey: `agent:main:${profileId}`,
+        sessionId: `session-${profileId}`,
+        lifecycleRevision: "1",
         providerId: "openai",
         authScope: "personal",
       });
@@ -218,6 +229,147 @@ describe("usage.status provider usage cache", () => {
     expect(plus.providers[0]?.accountEmail).toBeUndefined();
     expect(pro.providers[0]?.windows[0]?.usedPercent).toBe(20);
     expect(mocks.loadProviderUsageSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps exact credential scope verified while exposing an account mismatch", async () => {
+    mocks.loadProviderUsageSummary.mockResolvedValue({
+      updatedAt: now,
+      providers: [
+        {
+          provider: "openai",
+          displayName: "OpenAI",
+          windows: [{ label: "168h", usedPercent: 10 }],
+          accountEmail: "quota-owner@example.test",
+        },
+      ],
+    });
+    const result = await loadCredentialUsageStatusStaleWhileRevalidate({
+      agentId: "main",
+      agentDir: "agent-dir",
+      authStore: createStore(),
+      exactAuth: { provider: "openai", token: "access-one", authProfileId: "openai:default" },
+      config,
+      credentialFingerprint: "credential-binding",
+      accountBindingId: fingerprintAuthAccountIdentity("different-owner@example.test"),
+      sessionKey: "agent:main:main",
+      sessionId: "session-one",
+      lifecycleRevision: "7",
+      providerId: "openai",
+      authScope: "shared",
+      now,
+    });
+    expect(result).toMatchObject({
+      sessionScope: {
+        status: "verified",
+        requestedSessionKey: "agent:main:main",
+        effectiveSessionKey: "agent:main:main",
+        credential: { consistency: "match" },
+        account: { consistency: "mismatch" },
+      },
+      cache: { status: "fresh" },
+    });
+    expect(result.providers[0]?.accountEmail).toBeUndefined();
+  });
+
+  it("marks a scoped cached sample stale while its exact-credential refresh runs", async () => {
+    const heldRefresh = createDeferredCore<UsageSummary>();
+    mocks.loadProviderUsageSummary.mockResolvedValueOnce({
+      updatedAt: now,
+      providers: [
+        {
+          provider: "openai",
+          displayName: "OpenAI",
+          windows: [{ label: "5h", usedPercent: 10 }],
+          accountEmail: "owner@example.test",
+        },
+      ],
+    });
+    const options = {
+      agentId: "main",
+      agentDir: "agent-dir",
+      authStore: createStore(),
+      exactAuth: {
+        provider: "openai",
+        token: "access-one",
+        authProfileId: "openai:default",
+      },
+      config,
+      credentialFingerprint: "credential-binding",
+      sessionKey: "agent:main:main",
+      sessionId: "session-one",
+      lifecycleRevision: "7",
+      providerId: "openai",
+      accountBindingId: fingerprintAuthAccountIdentity("owner@example.test"),
+      authScope: "shared" as const,
+    };
+    const first = await loadCredentialUsageStatusStaleWhileRevalidate({ ...options, now });
+    expect(first).toMatchObject({
+      sampledAt: 1_000,
+      sessionScope: { status: "verified" },
+      cache: { status: "fresh", ageMs: 0 },
+    });
+
+    now = 62_000;
+    mocks.loadProviderUsageSummary.mockImplementationOnce(() => heldRefresh.promise);
+    const stale = await loadCredentialUsageStatusStaleWhileRevalidate({ ...options, now });
+    expect(stale).toMatchObject({
+      sampledAt: 1_000,
+      sessionScope: { status: "verified" },
+      cache: { status: "stale", ageMs: 61_000, refreshing: true },
+    });
+
+    heldRefresh.resolve({
+      updatedAt: now,
+      providers: [
+        {
+          provider: "openai",
+          displayName: "OpenAI",
+          windows: [{ label: "5h", usedPercent: 30 }],
+          accountEmail: "owner@example.test",
+        },
+      ],
+    });
+    await vi.waitFor(async () => {
+      expect(
+        await loadCredentialUsageStatusStaleWhileRevalidate({ ...options, now: 62_001 }),
+      ).toMatchObject({
+        sampledAt: 62_000,
+        sessionScope: { status: "verified" },
+        cache: { status: "fresh", ageMs: 1 },
+      });
+    });
+  });
+
+  it("returns an explicit session refreshing scope before a cold sample exists", async () => {
+    const heldRefresh = createDeferredCore<UsageSummary>();
+    mocks.loadProviderUsageSummary.mockImplementationOnce(() => heldRefresh.promise);
+    const refreshing = await loadCredentialUsageStatusStaleWhileRevalidate({
+      agentId: "main",
+      agentDir: "agent-dir",
+      authStore: createStore(),
+      exactAuth: {
+        provider: "openai",
+        token: "access-one",
+        authProfileId: "openai:default",
+      },
+      config,
+      credentialFingerprint: "credential-binding",
+      sessionKey: "agent:main:main",
+      sessionId: "session-one",
+      lifecycleRevision: "7",
+      providerId: "openai",
+      authScope: "shared",
+      coldRead: "refresh-marker",
+      now,
+    });
+    expect(refreshing).toMatchObject({
+      providers: [],
+      sessionScope: { status: "refreshing" },
+      cache: { status: "refreshing", refreshing: true },
+    });
+    expect(refreshing.sampledAt).toBeUndefined();
+    heldRefresh.resolve({ updatedAt: now, providers: [] });
+    await heldRefresh.promise;
   });
 
   it("hands the exact runtime config to the background refresh", async () => {

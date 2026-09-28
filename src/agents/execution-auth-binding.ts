@@ -45,6 +45,12 @@ function normalizeIdentity(value: string | undefined, lowercase = false): string
   return normalized ? (lowercase ? normalized.toLowerCase() : normalized) : undefined;
 }
 
+/** Process-local proof for comparing account identities without exposing the identity. */
+export function fingerprintAuthAccountIdentity(value: string | undefined): string | undefined {
+  const normalized = normalizeIdentity(value, true);
+  return normalized ? hashAuthBinding(["account-identity-v1", normalized]) : undefined;
+}
+
 /**
  * Project non-secret profile ownership for runtimes that keep rotating tokens
  * behind their own process boundary. An explicitly selected missing profile

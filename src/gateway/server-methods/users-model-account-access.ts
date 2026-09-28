@@ -4,7 +4,10 @@ import {
   prepareUserProfileRoleAuthority,
   prepareUserProfileSelectionAuthority,
 } from "../../state/user-channel-identity-operations.js";
-import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
+import {
+  isUserModelAuthProfileId,
+  parseUserModelAuthProfileId,
+} from "../../state/user-model-account-id.js";
 import { isUserModelAuthProfileOwner } from "../../state/user-model-accounts.js";
 import { ensureProfileIdForEmail } from "../../state/user-profile-email.js";
 import { UserProfileNotFoundError } from "../../state/user-profiles-schema.js";
@@ -118,6 +121,28 @@ export async function preparePersonalModelAccountSelection(
   requiredScope: PersonalModelSelectionScope = "operator.write",
 ): Promise<UserModelAccountSelection> {
   const action = await prepareUserModelAccountAction(options, undefined, requiredScope);
+  const assertCurrent = () => {
+    action.assertCurrent();
+    if (!isUserModelAuthProfileOwner({ profileId: action.owner, authProfileId })) {
+      throw new ModelAccountConnectAuthorityError();
+    }
+  };
+  assertCurrent();
+  return { owner: action.owner, authProfileId, assertCurrent };
+}
+
+/** Authorize a current owner or administrator to read one personal account. */
+export async function preparePersonalModelAccountRead(
+  options: Pick<GatewayRequestHandlerOptions, "client" | "context" | "signal">,
+  authProfileId: string,
+): Promise<UserModelAccountSelection> {
+  const locator = parseUserModelAuthProfileId(authProfileId);
+  if (!locator) throw new ModelAccountConnectAuthorityError();
+  const action = await prepareUserModelAccountAction(
+    options,
+    locator.ownerProfileId,
+    SESSION_READ_SCOPE,
+  );
   const assertCurrent = () => {
     action.assertCurrent();
     if (!isUserModelAuthProfileOwner({ profileId: action.owner, authProfileId })) {

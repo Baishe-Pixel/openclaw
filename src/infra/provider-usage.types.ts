@@ -77,7 +77,46 @@ export type ProviderUsageSnapshot = {
   accountEmail?: string;
   /** Process-local, non-reversible identity of the credential used for this snapshot. */
   credentialFingerprint?: string;
+  /** Process-local, non-reversible identity of the provider-reported account. */
+  accountBindingId?: string;
   error?: string;
+};
+
+export type SessionUsageBindingConsistency = "match" | "mismatch" | "unavailable";
+
+export type SessionUsageScope = {
+  status: "verified" | "refreshing" | "unavailable";
+  /** Canonical session key accepted for this request. */
+  requestedSessionKey: string;
+  /** Canonical session key whose successful auth binding was sampled. */
+  effectiveSessionKey: string;
+  authScope?: "personal" | "shared";
+  reason?:
+    | "binding-missing"
+    | "credential-missing"
+    | "provider-mismatch"
+    | "credential-changed"
+    | "auth-unavailable"
+    | "account-binding-unavailable"
+    | "account-binding-mismatch";
+  credential: {
+    sessionBindingId?: string;
+    sampledBindingId?: string;
+    consistency: SessionUsageBindingConsistency;
+  };
+  account: {
+    sessionBindingId?: string;
+    sampledBindingId?: string;
+    consistency: SessionUsageBindingConsistency;
+  };
+};
+
+export type SessionUsageCacheMetadata = {
+  status: "fresh" | "stale" | "refreshing" | "unavailable";
+  sampledAt?: number;
+  ageMs?: number;
+  ttlMs?: number;
+  refreshing?: boolean;
 };
 
 export type UsageSummary = {
@@ -88,6 +127,12 @@ export type UsageSummary = {
   /** Credential scope for a session-bound query; absent on the legacy global query. */
   authScope?: "personal" | "shared";
   credentialFingerprint?: string;
+  /** Strictly projected metadata for a session-scoped query. Absent on legacy reads. */
+  sessionScope?: SessionUsageScope;
+  /** Time the provider values were sampled. Absent while unavailable or cold-refreshing. */
+  sampledAt?: number;
+  /** Cache freshness for a session-scoped query. Absent on legacy reads. */
+  cache?: SessionUsageCacheMetadata;
 };
 
 /** Normalized provider id. Usage providers are discovered from plugin hooks at runtime. */

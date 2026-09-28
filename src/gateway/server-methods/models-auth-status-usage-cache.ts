@@ -1,6 +1,8 @@
 // Stale-while-revalidate cache for models.authStatus provider usage enrichment.
 import type { AuthProfileStore } from "../../agents/auth-profiles.js";
+import { fingerprintAuthAccountIdentity } from "../../agents/execution-auth-binding.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { ProviderAuth } from "../../infra/provider-usage.auth.js";
 import { loadProviderUsageSummary } from "../../infra/provider-usage.load.js";
 import { PROVIDER_USAGE_TIMEOUT_MS } from "../../infra/provider-usage.shared.js";
 import type {
@@ -29,6 +31,7 @@ type ProviderUsageCacheIdentity = {
   configRef: OpenClawConfig;
   credentialKey: string;
   providerKey: string;
+  cacheScopeKey?: string;
 };
 
 type ProviderUsageCacheEntry = ProviderUsageCacheIdentity & {
@@ -129,19 +132,29 @@ function scheduleProviderUsageRefresh(
   params: ProviderUsageCacheIdentity & {
     agentId: string;
     authStore?: AuthProfileStore;
+    exactAuth?: ProviderAuth;
     providerIds: UsageProviderId[];
     lastGood?: UsageSummary;
     resultCredentialFingerprint?: string;
+    resultAccountBindingId?: string;
+    resultRequestedSessionKey?: string;
+    resultEffectiveSessionKey?: string;
     authScope?: "personal" | "shared";
   },
 ): Promise<UsageSummary> {
-  const cacheKey = JSON.stringify([params.agentId, params.credentialKey, params.providerKey]);
+  const cacheKey = JSON.stringify([
+    params.agentId,
+    params.cacheScopeKey ?? null,
+    params.credentialKey,
+    params.providerKey,
+  ]);
   const active = usageRefreshByCredential.get(cacheKey);
   if (
     active?.agentDir === params.agentDir &&
     active.configRef === params.configRef &&
     active.credentialKey === params.credentialKey &&
-    active.providerKey === params.providerKey
+    active.providerKey === params.providerKey &&
+    active.cacheScopeKey === params.cacheScopeKey
   ) {
     return active.promise;
   }
@@ -152,21 +165,65 @@ function scheduleProviderUsageRefresh(
       providers: params.providerIds,
       agentDir: params.agentDir,
       authStore: params.authStore,
+      ...(params.exactAuth ? { auth: [params.exactAuth] } : {}),
       config: params.configRef,
       timeoutMs: PROVIDER_USAGE_TIMEOUT_MS,
     })
       .then((freshUsage) => {
+        const scopedProviders = params.resultCredentialFingerprint
+          ? freshUsage.providers.map(({ accountEmail, ...provider }) => {
+              const accountBindingId = fingerprintAuthAccountIdentity(accountEmail);
+              return {
+                ...provider,
+                credentialFingerprint: params.resultCredentialFingerprint,
+                ...(accountBindingId ? { accountBindingId } : {}),
+              };
+            })
+          : undefined;
+        const sampledAccountBindingIds = [
+          ...new Set(
+            (scopedProviders ?? [])
+              .map((provider) => provider.accountBindingId)
+              .filter((value): value is string => Boolean(value)),
+          ),
+        ];
+        const sampledAccountBindingId =
+          sampledAccountBindingIds.length === 1 ? sampledAccountBindingIds[0] : undefined;
+        const accountConsistency =
+          params.resultAccountBindingId && sampledAccountBindingId
+            ? params.resultAccountBindingId === sampledAccountBindingId
+              ? ("match" as const)
+              : ("mismatch" as const)
+            : ("unavailable" as const);
+        // Exact successful-credential proof is independent from provider account ownership.
+        // OpenAI consumers must additionally require account.consistency=match; providers
+        // without an account identity (for example balance APIs) may still use the exact
+        // credential-scoped result.
+        const scopeStatus = "verified" as const;
         const scopedUsage = params.resultCredentialFingerprint
           ? {
               ...freshUsage,
               authScope: params.authScope,
               credentialFingerprint: params.resultCredentialFingerprint,
-              providers: freshUsage.providers.map(
-                ({ accountEmail: _accountEmail, ...provider }) => ({
-                  ...provider,
-                  credentialFingerprint: params.resultCredentialFingerprint,
-                }),
-              ),
+              providers: scopedProviders ?? [],
+              sessionScope: {
+                status: scopeStatus,
+                requestedSessionKey: params.resultRequestedSessionKey ?? "",
+                effectiveSessionKey: params.resultEffectiveSessionKey ?? "",
+                authScope: params.authScope,
+                credential: {
+                  sessionBindingId: params.resultCredentialFingerprint,
+                  sampledBindingId: params.resultCredentialFingerprint,
+                  consistency: "match" as const,
+                },
+                account: {
+                  ...(params.resultAccountBindingId
+                    ? { sessionBindingId: params.resultAccountBindingId }
+                    : {}),
+                  ...(sampledAccountBindingId ? { sampledBindingId: sampledAccountBindingId } : {}),
+                  consistency: accountConsistency,
+                },
+              },
             }
           : freshUsage;
         const usage = retainLastGoodOnTimeout(scopedUsage, params.lastGood);
@@ -180,6 +237,7 @@ function scheduleProviderUsageRefresh(
             configRef: params.configRef,
             credentialKey: params.credentialKey,
             providerKey: params.providerKey,
+            cacheScopeKey: params.cacheScopeKey,
             refreshedAt: Date.now(),
             summary: usage,
             usageByProvider: mapProviderUsage(usage),
@@ -207,6 +265,7 @@ function scheduleProviderUsageRefresh(
     configRef: params.configRef,
     credentialKey: params.credentialKey,
     providerKey: params.providerKey,
+    cacheScopeKey: params.cacheScopeKey,
     promise,
   };
   usageRefreshByCredential.set(cacheKey, refresh);
@@ -217,13 +276,18 @@ type ProviderUsageCacheParams = {
   agentId: string;
   agentDir: string;
   authStore?: AuthProfileStore;
+  exactAuth?: ProviderAuth;
   configRef: OpenClawConfig;
   credentialKey: string;
+  cacheScopeKey?: string;
   coldRead?: "refresh-marker";
   forceRefresh?: boolean;
   providerIds: UsageProviderId[];
   now: number;
   resultCredentialFingerprint?: string;
+  resultAccountBindingId?: string;
+  resultRequestedSessionKey?: string;
+  resultEffectiveSessionKey?: string;
   authScope?: "personal" | "shared";
 };
 
@@ -231,13 +295,19 @@ function resolveProviderUsageCacheRead(params: ProviderUsageCacheParams) {
   const providerIds = params.providerIds.toSorted();
   const providerKey = providerIds.join("\0");
   const credentialKey = scopeProviderUsageCredentialKey(params.credentialKey, providerIds);
-  const cacheKey = JSON.stringify([params.agentId, credentialKey, providerKey]);
+  const cacheKey = JSON.stringify([
+    params.agentId,
+    params.cacheScopeKey ?? null,
+    credentialKey,
+    providerKey,
+  ]);
   const cached = usageCacheByCredential.get(cacheKey);
   const matching =
     cached?.agentDir === params.agentDir &&
     cached.configRef === params.configRef &&
     cached.credentialKey === credentialKey &&
-    cached.providerKey === providerKey
+    cached.providerKey === providerKey &&
+    cached.cacheScopeKey === params.cacheScopeKey
       ? cached
       : undefined;
   const needsRefresh =
@@ -251,13 +321,38 @@ function resolveProviderUsageCacheRead(params: ProviderUsageCacheParams) {
       agentId: params.agentId,
       agentDir: params.agentDir,
       authStore: params.authStore,
+      exactAuth: params.exactAuth,
       configRef: params.configRef,
       credentialKey,
+      cacheScopeKey: params.cacheScopeKey,
       providerIds,
       providerKey,
       lastGood: matching?.summary,
       resultCredentialFingerprint: params.resultCredentialFingerprint,
+      resultAccountBindingId: params.resultAccountBindingId,
+      resultRequestedSessionKey: params.resultRequestedSessionKey,
+      resultEffectiveSessionKey: params.resultEffectiveSessionKey,
       authScope: params.authScope,
+    },
+  };
+}
+
+function projectSessionCacheMetadata(params: {
+  summary: UsageSummary;
+  now: number;
+  status: "fresh" | "stale";
+  refreshing?: boolean;
+}): UsageSummary {
+  const sampledAt = params.summary.updatedAt;
+  return {
+    ...params.summary,
+    sampledAt,
+    cache: {
+      status: params.status,
+      sampledAt,
+      ageMs: Math.max(0, params.now - sampledAt),
+      ttlMs: USAGE_CACHE_TTL_MS,
+      ...(params.refreshing ? { refreshing: true } : {}),
     },
   };
 }
@@ -318,8 +413,13 @@ export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
   agentId: string;
   agentDir: string;
   authStore: AuthProfileStore;
+  exactAuth: ProviderAuth;
   config: OpenClawConfig;
   credentialFingerprint: string;
+  accountBindingId?: string;
+  sessionKey: string;
+  sessionId: string;
+  lifecycleRevision: string;
   providerId: UsageProviderId;
   authScope: "personal" | "shared";
   coldRead?: "refresh-marker";
@@ -330,7 +430,13 @@ export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
     agentId: options.agentId,
     agentDir: options.agentDir,
     authStore: options.authStore,
+    exactAuth: options.exactAuth,
     configRef: options.config,
+    cacheScopeKey: JSON.stringify([
+      options.sessionKey,
+      options.sessionId,
+      options.lifecycleRevision,
+    ]),
     credentialKey: JSON.stringify({
       profiles: [[options.providerId, options.credentialFingerprint]],
       direct: [],
@@ -339,19 +445,35 @@ export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
     coldRead: options.coldRead,
     now,
     resultCredentialFingerprint: options.credentialFingerprint,
+    resultAccountBindingId: options.accountBindingId,
+    resultRequestedSessionKey: options.sessionKey,
+    resultEffectiveSessionKey: options.sessionKey,
     authScope: options.authScope,
   };
   const { matching, needsRefresh, refreshParams } = resolveProviderUsageCacheRead(params);
   if (matching && !needsRefresh) {
-    return matching.summary;
+    return projectSessionCacheMetadata({
+      summary: matching.summary,
+      now,
+      status: "fresh",
+    });
   }
   const refresh = scheduleProviderUsageRefresh(refreshParams);
   if (matching) {
     void refresh.catch(() => {});
-    return matching.summary;
+    return projectSessionCacheMetadata({
+      summary: matching.summary,
+      now,
+      status: "stale",
+      refreshing: true,
+    });
   }
   if (options.coldRead !== "refresh-marker") {
-    return await refresh;
+    return projectSessionCacheMetadata({
+      summary: await refresh,
+      now,
+      status: "fresh",
+    });
   }
   void refresh.catch(() => {});
   return {
@@ -360,5 +482,20 @@ export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
     refreshing: true,
     authScope: options.authScope,
     credentialFingerprint: options.credentialFingerprint,
+    sessionScope: {
+      status: "refreshing",
+      requestedSessionKey: options.sessionKey,
+      effectiveSessionKey: options.sessionKey,
+      authScope: options.authScope,
+      credential: {
+        sessionBindingId: options.credentialFingerprint,
+        consistency: "unavailable",
+      },
+      account: {
+        ...(options.accountBindingId ? { sessionBindingId: options.accountBindingId } : {}),
+        consistency: "unavailable",
+      },
+    },
+    cache: { status: "refreshing", refreshing: true, ttlMs: USAGE_CACHE_TTL_MS },
   };
 }

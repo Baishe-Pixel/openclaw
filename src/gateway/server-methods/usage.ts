@@ -12,10 +12,18 @@ import {
 } from "../../../packages/gateway-protocol/src/index.js";
 import { resolveApiKeyForProfile, type AuthProfileStore } from "../../agents/auth-profiles.js";
 import { readUserModelAuthProfileAsync } from "../../agents/auth-profiles/sqlite-read.js";
-import { fingerprintResolvedAuthProfileCredential } from "../../agents/execution-auth-binding.js";
-import { readSessionSuccessfulAuthBinding } from "../../agents/session-successful-auth-binding.js";
+import {
+  fingerprintAuthAccountIdentity,
+  fingerprintResolvedAuthProfileCredential,
+} from "../../agents/execution-auth-binding.js";
+import {
+  readSessionSuccessfulAuthBinding,
+  replaceSessionSuccessfulAuthFingerprint,
+  type SessionSuccessfulAuthBinding,
+} from "../../agents/session-successful-auth-binding.js";
 import { sessionCreatorProfileId } from "../../config/sessions/session-entry-provenance.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { UsageSummary } from "../../infra/provider-usage.types.js";
 import { loadSessionLogs, loadSessionUsageTimeSeries } from "../../infra/session-cost-usage.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import {
@@ -34,6 +42,7 @@ import {
   sessionDeliveryChannel,
   sessionDeliveryOrigin,
 } from "../../utils/delivery-context.read.js";
+import { ModelAccountConnectAuthorityError } from "../model-account-connect.js";
 import { operatorSessionCap } from "../operator-role-policy.js";
 import { projectSessionActor } from "../session-identity-projection.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
@@ -64,6 +73,7 @@ import {
   type UsageGroupingMode,
   type UsageSessionSelection,
 } from "./usage-session-selection.js";
+import { preparePersonalModelAccountRead } from "./users-model-account-access.js";
 import { assertValidParams } from "./validation.js";
 
 function resolveSessionUsageFileOrRespond(
@@ -170,6 +180,29 @@ function projectUsageCreator(
   return { key, ...(projected ? { actor: projected } : {}) };
 }
 
+function unavailableSessionCredentialUsage(
+  reason: NonNullable<UsageSummary["sessionScope"]>["reason"],
+  sessionKey: string,
+  successful?: SessionSuccessfulAuthBinding,
+): UsageSummary {
+  return {
+    updatedAt: Date.now(),
+    providers: [],
+    sessionScope: {
+      status: "unavailable",
+      requestedSessionKey: sessionKey,
+      effectiveSessionKey: sessionKey,
+      reason,
+      credential: {
+        ...(successful ? { sessionBindingId: successful.authFingerprint } : {}),
+        consistency: "unavailable",
+      },
+      account: { consistency: "unavailable" },
+    },
+    cache: { status: "unavailable" },
+  };
+}
+
 async function loadSessionCredentialUsage(
   options: GatewayRequestHandlerOptions,
   coldRead: "refresh-marker" | undefined,
@@ -181,39 +214,46 @@ async function loadSessionCredentialUsage(
     return undefined;
   }
   try {
+    const sessionKey = scope.sessionKey;
+    if (!sessionKey) {
+      scope.assertCurrent?.();
+      return undefined;
+    }
     const config = options.context.getRuntimeConfig();
-    const successful = scope.sessionKey
-      ? readSessionSuccessfulAuthBinding({
-          sessionKey: scope.sessionKey,
-          sessionId: scope.sessionEntry?.sessionId,
-          lifecycleRevision: scope.sessionEntry?.lifecycleRevision,
-          provider: scope.sessionEntry?.modelProvider,
-          model: scope.sessionEntry?.model,
-        })
-      : undefined;
+    const successful = readSessionSuccessfulAuthBinding({
+      sessionKey,
+      sessionId: scope.sessionEntry?.sessionId,
+      lifecycleRevision: scope.sessionEntry?.lifecycleRevision,
+      provider: scope.sessionEntry?.modelProvider,
+      model: scope.sessionEntry?.model,
+    });
     if (!successful) {
       scope.assertCurrent?.();
-      return { updatedAt: Date.now(), providers: [] };
+      return unavailableSessionCredentialUsage("binding-missing", sessionKey);
     }
     const profileId = successful.authProfileId;
+    const personal = isUserModelAuthProfileId(profileId);
+    const personalAuthority = personal
+      ? await preparePersonalModelAccountRead(options, profileId)
+      : undefined;
+    personalAuthority?.assertCurrent();
 
     const runtime = getProviderUsageRuntimeSnapshot({
       config,
       agentId: scope.agentId,
     });
-    const personal = isUserModelAuthProfileId(profileId);
     const credential = personal
       ? (await readUserModelAuthProfileAsync(profileId, captureOpenClawStateWorkerContext()))
           ?.credential
       : runtime.store.profiles[profileId];
     if (!credential) {
       scope.assertCurrent?.();
-      return { updatedAt: Date.now(), providers: [] };
+      return unavailableSessionCredentialUsage("credential-missing", sessionKey, successful);
     }
     const providerId = successful.provider;
     if (credential.provider.trim() !== providerId) {
       scope.assertCurrent?.();
-      return { updatedAt: Date.now(), providers: [] };
+      return unavailableSessionCredentialUsage("provider-mismatch", sessionKey, successful);
     }
     const authStore: AuthProfileStore = {
       version: runtime.store.version,
@@ -221,16 +261,24 @@ async function loadSessionCredentialUsage(
       order: { [providerId]: [profileId] },
       lastGood: { [providerId]: profileId },
     };
-    const resolvedProfile = await resolveApiKeyForProfile({
-      cfg: config,
-      store: authStore,
-      profileId,
-      agentDir: runtime.agentDir,
-      allowProfileFallback: false,
-    });
-    if (!resolvedProfile || resolvedProfile.profileId !== profileId) {
+    let resolvedProfile: Awaited<ReturnType<typeof resolveApiKeyForProfile>>;
+    try {
+      resolvedProfile = await resolveApiKeyForProfile({
+        cfg: config,
+        store: authStore,
+        profileId,
+        agentDir: runtime.agentDir,
+        allowProfileFallback: false,
+      });
+    } catch {
+      personalAuthority?.assertCurrent();
       scope.assertCurrent?.();
-      return { updatedAt: Date.now(), providers: [] };
+      return unavailableSessionCredentialUsage("auth-unavailable", sessionKey, successful);
+    }
+    if (!resolvedProfile || resolvedProfile.profileId !== profileId) {
+      personalAuthority?.assertCurrent();
+      scope.assertCurrent?.();
+      return unavailableSessionCredentialUsage("auth-unavailable", sessionKey, successful);
     }
     const resolvedAuth = {
       apiKey: resolvedProfile.apiKey,
@@ -238,26 +286,90 @@ async function loadSessionCredentialUsage(
       source: `profile:${profileId}`,
       mode: credential.type === "api_key" ? "api-key" : credential.type,
     } as const;
-    const credentialFingerprint = fingerprintResolvedAuthProfileCredential({
+    const boundCredentialFingerprint = fingerprintResolvedAuthProfileCredential({
       profileId,
       credential,
       resolvedAuth,
     });
-    if (!credentialFingerprint || credentialFingerprint !== successful.authFingerprint) {
+    if (!boundCredentialFingerprint || boundCredentialFingerprint !== successful.authFingerprint) {
       scope.assertCurrent?.();
-      return { updatedAt: Date.now(), providers: [] };
+      return unavailableSessionCredentialUsage("credential-changed", sessionKey, successful);
     }
+    const effectiveCredential =
+      credential.type === "oauth" && resolvedProfile.credential?.type === "oauth"
+        ? resolvedProfile.credential
+        : credential;
+    const sampledCredentialFingerprint = fingerprintResolvedAuthProfileCredential({
+      profileId,
+      credential: effectiveCredential,
+      resolvedAuth,
+    });
+    if (!sampledCredentialFingerprint || resolvedProfile.provider.trim() !== providerId) {
+      personalAuthority?.assertCurrent();
+      scope.assertCurrent?.();
+      return unavailableSessionCredentialUsage("auth-unavailable", sessionKey, successful);
+    }
+    personalAuthority?.assertCurrent();
+    scope.assertCurrent?.();
+    const exactAuth = {
+      provider: providerId,
+      token: resolvedProfile.apiKey,
+      authProfileId: profileId,
+      ...(effectiveCredential.type === "oauth" && effectiveCredential.authFlow
+        ? { authFlow: effectiveCredential.authFlow }
+        : {}),
+      ...(effectiveCredential.type === "oauth" && effectiveCredential.accountId
+        ? { accountId: effectiveCredential.accountId }
+        : {}),
+      ...(effectiveCredential.type === "oauth" && effectiveCredential.subscriptionType
+        ? { subscriptionType: effectiveCredential.subscriptionType }
+        : {}),
+      ...(effectiveCredential.type === "oauth" && effectiveCredential.rateLimitTier
+        ? { rateLimitTier: effectiveCredential.rateLimitTier }
+        : {}),
+      ...(effectiveCredential.email ? { email: effectiveCredential.email } : {}),
+    };
+    const accountBindingId = fingerprintAuthAccountIdentity(effectiveCredential.email);
     const summary = await loadCredentialUsageStatusStaleWhileRevalidate({
       agentId: scope.agentId,
       agentDir: runtime.agentDir,
       authStore,
+      exactAuth,
       config,
-      credentialFingerprint: successful.authFingerprint,
+      credentialFingerprint: sampledCredentialFingerprint,
+      accountBindingId,
+      sessionKey: successful.sessionKey,
+      sessionId: successful.sessionId,
+      lifecycleRevision: successful.lifecycleRevision,
       providerId,
       authScope: personal ? "personal" : "shared",
       coldRead,
     });
+    personalAuthority?.assertCurrent();
     scope.assertCurrent?.();
+    if (sampledCredentialFingerprint !== successful.authFingerprint) {
+      const replaced = replaceSessionSuccessfulAuthFingerprint({
+        sessionKey: successful.sessionKey,
+        sessionId: successful.sessionId,
+        lifecycleRevision: successful.lifecycleRevision,
+        expectedFingerprint: successful.authFingerprint,
+        nextFingerprint: sampledCredentialFingerprint,
+      });
+      if (!replaced) {
+        return unavailableSessionCredentialUsage("credential-changed", sessionKey, successful);
+      }
+    } else {
+      const current = readSessionSuccessfulAuthBinding({
+        sessionKey: successful.sessionKey,
+        sessionId: successful.sessionId,
+        lifecycleRevision: successful.lifecycleRevision,
+        provider: successful.provider,
+        model: successful.model,
+      });
+      if (current?.authFingerprint !== successful.authFingerprint) {
+        return unavailableSessionCredentialUsage("credential-changed", sessionKey, successful);
+      }
+    }
     return summary;
   } finally {
     scope.release?.();
@@ -281,12 +393,19 @@ export const usageHandlers: GatewayRequestHandlers = {
     )
       ? ("refresh-marker" as const)
       : undefined;
-    const summary = params.sessionKey
-      ? await loadSessionCredentialUsage(options, coldRead)
-      : await loadUsageStatusStaleWhileRevalidate({
-          config: context.getRuntimeConfig(),
-          coldRead,
-        });
+    let summary;
+    try {
+      summary = params.sessionKey
+        ? await loadSessionCredentialUsage(options, coldRead)
+        : await loadUsageStatusStaleWhileRevalidate({
+            config: context.getRuntimeConfig(),
+            coldRead,
+          });
+    } catch (error) {
+      if (!(error instanceof ModelAccountConnectAuthorityError)) throw error;
+      respond(false, undefined, errorShape(ErrorCodes.FORBIDDEN, error.message));
+      return;
+    }
     if (!summary) {
       return;
     }

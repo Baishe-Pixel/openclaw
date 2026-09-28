@@ -80,6 +80,27 @@ export function readSessionSuccessfulAuthBinding(params: {
   return binding;
 }
 
+/** Preserve a proven OAuth grant across a token rotation without changing its session owner. */
+export function replaceSessionSuccessfulAuthFingerprint(params: {
+  sessionKey: string;
+  sessionId: string;
+  lifecycleRevision: string;
+  expectedFingerprint: string;
+  nextFingerprint: string;
+}): boolean {
+  const binding = bindings.get(params.sessionKey);
+  if (
+    !binding ||
+    binding.sessionId !== params.sessionId ||
+    binding.lifecycleRevision !== params.lifecycleRevision ||
+    binding.authFingerprint !== params.expectedFingerprint
+  ) {
+    return false;
+  }
+  bindings.set(params.sessionKey, { ...binding, authFingerprint: params.nextFingerprint });
+  return true;
+}
+
 export function invalidateSessionSuccessfulAuthBinding(sessionKey: string): void {
   bindings.delete(sessionKey);
 }

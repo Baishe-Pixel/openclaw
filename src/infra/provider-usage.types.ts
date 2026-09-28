@@ -98,7 +98,8 @@ export type SessionUsageScope = {
     | "credential-changed"
     | "auth-unavailable"
     | "account-binding-unavailable"
-    | "account-binding-mismatch";
+    | "account-binding-mismatch"
+    | "personal-account-authority-required";
   credential: {
     sessionBindingId?: string;
     sampledBindingId?: string;

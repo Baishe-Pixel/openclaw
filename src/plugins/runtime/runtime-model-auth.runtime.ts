@@ -1,6 +1,5 @@
 // Runtime model auth helpers expose provider auth resolution to plugin runtimes.
 import { resolveApiKeyForProfile, type AuthProfileStore } from "../../agents/auth-profiles.js";
-import { readUserModelAuthProfileAsync } from "../../agents/auth-profiles/sqlite-read.js";
 import {
   fingerprintAuthAccountIdentity,
   fingerprintResolvedAuthProfileCredential,
@@ -15,7 +14,6 @@ import { loadCredentialUsageStatusStaleWhileRevalidate } from "../../gateway/ser
 import { getProviderUsageRuntimeSnapshot } from "../../gateway/server-methods/provider-usage-runtime.js";
 import type { UsageSummary } from "../../infra/provider-usage.types.js";
 import type { Model } from "../../llm/types.js";
-import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import { prepareProviderRuntimeAuth } from "../provider-runtime.runtime.js";
 import type { ResolvedProviderRuntimeAuth } from "./model-auth-types.js";
@@ -120,12 +118,14 @@ export async function getReplyUsageCore(params: {
     );
   };
   const profileId = successful.authProfileId;
-  const personal = isUserModelAuthProfileId(profileId);
+  // A historical run proves provenance, not current authority over a personal account.
+  // Personal quota remains available only through the Gateway path, which carries a
+  // live owner/admin grant to the final provider I/O boundary.
+  if (isUserModelAuthProfileId(profileId)) {
+    return unavailableReplyUsage(params.sessionKey, "personal-account-authority-required");
+  }
   const runtime = getProviderUsageRuntimeSnapshot({ config: params.cfg, agentId: params.agentId });
-  const credential = personal
-    ? (await readUserModelAuthProfileAsync(profileId, captureOpenClawStateWorkerContext()))
-        ?.credential
-    : runtime.store.profiles[profileId];
+  const credential = runtime.store.profiles[profileId];
   if (!isCurrent()) return unavailableReplyUsage(params.sessionKey, "credential-changed");
   if (!credential) return unavailableReplyUsage(params.sessionKey, "credential-missing");
   if (credential.provider.trim() !== successful.provider) {
@@ -213,7 +213,7 @@ export async function getReplyUsageCore(params: {
     sessionId: successful.sessionId,
     lifecycleRevision: successful.lifecycleRevision,
     providerId: successful.provider,
-    authScope: personal ? "personal" : "shared",
+    authScope: "shared",
     assertCurrent,
   });
   if (!isCurrent()) return unavailableReplyUsage(params.sessionKey, "credential-changed");

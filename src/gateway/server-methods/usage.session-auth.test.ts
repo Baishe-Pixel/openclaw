@@ -590,6 +590,53 @@ describe("usage.status session credential scope", () => {
     expect(mocks.loadProviderUsageSummary).not.toHaveBeenCalled();
   });
 
+  it("does not let reply-run provenance substitute for live personal-account authority", async () => {
+    const authFingerprint = expectDefined(
+      fingerprintResolvedAuthProfileCredential({
+        profileId: personalProfileId,
+        credential: personalCredential,
+        resolvedAuth: undefined,
+      }),
+      "personal credential fingerprint",
+    );
+    recordSessionSuccessfulAuthBinding({
+      runId: "run-personal",
+      sessionKey: "agent:main:main",
+      sessionId: sessionEntry.sessionId,
+      lifecycleRevision: String(sessionEntry.lifecycleRevision),
+      provider: sessionEntry.modelProvider,
+      model: sessionEntry.model,
+      binding: {
+        authProfileId: personalProfileId,
+        authFingerprint,
+        modelId: sessionEntry.model,
+      },
+    });
+
+    const result = await getReplyUsageCore({
+      runId: "run-personal",
+      sessionKey: "agent:main:main",
+      sessionId: sessionEntry.sessionId,
+      provider: sessionEntry.modelProvider,
+      model: sessionEntry.model,
+      agentId: "main",
+      cfg: config,
+    });
+
+    expect(result).toMatchObject({
+      providers: [],
+      sessionScope: {
+        status: "unavailable",
+        reason: "personal-account-authority-required",
+      },
+      cache: { status: "unavailable" },
+    });
+    expect(mocks.readUserModelAuthProfileAsync).not.toHaveBeenCalled();
+    expect(mocks.getProviderUsageRuntimeSnapshot).not.toHaveBeenCalled();
+    expect(mocks.resolveApiKeyForProfile).not.toHaveBeenCalled();
+    expect(mocks.loadProviderUsageSummary).not.toHaveBeenCalled();
+  });
+
   it("returns an empty unverified result without a successful binding", async () => {
     const { call } = await runScoped();
     expect(call?.[0]).toBe(true);

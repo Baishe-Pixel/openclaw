@@ -11,6 +11,7 @@ import * as providerAuthRuntime from "./provider-auth-runtime.js";
 describe("plugin-sdk provider-auth-runtime", () => {
   it("exports the runtime-ready auth helper", () => {
     expect(providerAuthRuntime.getRuntimeAuthForModel).toBeTypeOf("function");
+    expect(providerAuthRuntime.getReplyUsage).toBeTypeOf("function");
   });
 
   it("resolves non-secret provider auth profile metadata", async () => {

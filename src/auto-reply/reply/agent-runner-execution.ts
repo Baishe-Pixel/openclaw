@@ -643,6 +643,7 @@ async function executeAgentTurnOutcome(params: AgentTurnParams): Promise<AgentTu
     if (terminalStatus.status === "ok") {
       const entry = executionParams.getActiveSessionEntry();
       recordSessionSuccessfulAuthBinding({
+        runId,
         sessionKey: executionParams.sessionKey ?? executionParams.followupRun.run.sessionKey,
         sessionId: entry?.sessionId,
         lifecycleRevision: entry?.lifecycleRevision,

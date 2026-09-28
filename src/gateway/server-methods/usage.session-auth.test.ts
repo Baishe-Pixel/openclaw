@@ -44,6 +44,7 @@ vi.mock("../../infra/provider-usage.load.js", () => ({
   loadProviderUsageSummary: mocks.loadProviderUsageSummary,
 }));
 
+import { getReplyUsageCore } from "../../plugins/runtime/runtime-model-auth.runtime.js";
 import { clearModelAuthStatusUsageCache } from "./models-auth-status-usage-cache.js";
 import { usageHandlers } from "./usage.js";
 
@@ -533,6 +534,60 @@ describe("usage.status session credential scope", () => {
     expect(second.call?.[1].credentialFingerprint).toBe(refreshedFingerprint);
     expect(second.call?.[1].cache.status).toBe("fresh");
     expect(mocks.loadProviderUsageSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns sanitized usage only for the exact accepted reply run", async () => {
+    const authFingerprint = expectDefined(
+      fingerprintResolvedAuthProfileCredential({
+        profileId: "openai:shared-winner",
+        credential: sharedCredential,
+        resolvedAuth: undefined,
+      }),
+    );
+    recordSessionSuccessfulAuthBinding({
+      runId: "run-one",
+      sessionKey: "agent:main:main",
+      sessionId: sessionEntry.sessionId,
+      lifecycleRevision: String(sessionEntry.lifecycleRevision),
+      provider: sessionEntry.modelProvider,
+      model: sessionEntry.model,
+      binding: {
+        authProfileId: "openai:shared-winner",
+        authFingerprint,
+        modelId: sessionEntry.model,
+      },
+    });
+    const params = {
+      runId: "run-one",
+      sessionKey: "agent:main:main",
+      sessionId: sessionEntry.sessionId,
+      provider: sessionEntry.modelProvider,
+      model: sessionEntry.model,
+      agentId: "main",
+      cfg: config,
+    };
+    const result = await getReplyUsageCore(params);
+    expect(result).toMatchObject({
+      providers: [{ provider: "openai" }],
+      sessionScope: {
+        status: "verified",
+        requestedSessionKey: "agent:main:main",
+        effectiveSessionKey: "agent:main:main",
+        credential: { consistency: "match" },
+        account: { consistency: "match" },
+      },
+      cache: { status: "fresh" },
+    });
+    expect(result.providers[0]?.accountEmail).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("shared-access");
+
+    mocks.loadProviderUsageSummary.mockClear();
+    const rejected = await getReplyUsageCore({ ...params, runId: "run-other" });
+    expect(rejected).toMatchObject({
+      providers: [],
+      sessionScope: { status: "unavailable", reason: "binding-missing" },
+    });
+    expect(mocks.loadProviderUsageSummary).not.toHaveBeenCalled();
   });
 
   it("returns an empty unverified result without a successful binding", async () => {

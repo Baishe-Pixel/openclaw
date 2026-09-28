@@ -1,6 +1,7 @@
 import type { AgentExecutionAuthBinding } from "./execution-auth-binding.js";
 
 export type SessionSuccessfulAuthBinding = {
+  runId?: string;
   sessionKey: string;
   sessionId: string;
   lifecycleRevision: string;
@@ -16,6 +17,7 @@ const bindings = new Map<string, SessionSuccessfulAuthBinding>();
 
 /** Publish only the credential that completed an accepted terminal-success chat turn. */
 export function recordSessionSuccessfulAuthBinding(params: {
+  runId?: string;
   sessionKey: string | undefined;
   sessionId: string | undefined;
   lifecycleRevision: string | undefined;
@@ -41,6 +43,7 @@ export function recordSessionSuccessfulAuthBinding(params: {
   }
   bindings.delete(sessionKey);
   bindings.set(sessionKey, {
+    ...(params.runId?.trim() ? { runId: params.runId.trim() } : {}),
     sessionKey,
     sessionId,
     lifecycleRevision: params.lifecycleRevision,
@@ -78,6 +81,23 @@ export function readSessionSuccessfulAuthBinding(params: {
     return undefined;
   }
   return binding;
+}
+
+/** Read only the successful binding for one exact accepted reply run. */
+export function readReplySuccessfulAuthBinding(params: {
+  runId: string;
+  sessionKey: string;
+  sessionId: string;
+  provider: string;
+  model: string;
+}): SessionSuccessfulAuthBinding | undefined {
+  const binding = bindings.get(params.sessionKey);
+  return binding?.runId === params.runId &&
+    binding.sessionId === params.sessionId &&
+    binding.provider === params.provider &&
+    binding.model === params.model
+    ? binding
+    : undefined;
 }
 
 /** Preserve a proven OAuth grant across a token rotation without changing its session owner. */

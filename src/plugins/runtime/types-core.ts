@@ -588,6 +588,16 @@ export type PluginRuntimeCore = {
       cfg?: import("../../config/types.openclaw.js").OpenClawConfig;
       workspaceDir?: string;
     }) => Promise<import("./model-auth-types.js").ResolvedProviderRuntimeAuth>;
+    /** Read sanitized provider usage for one exact accepted reply run. */
+    getReplyUsage: (params: {
+      runId: string;
+      sessionKey: string;
+      sessionId: string;
+      provider: string;
+      model: string;
+      agentId: string;
+      cfg: import("../../config/types.openclaw.js").OpenClawConfig;
+    }) => Promise<import("../../infra/provider-usage.types.js").UsageSummary>;
     /** Resolve auth for a provider by name. Only provider, optional cfg, and workspaceDir are used. */
     resolveApiKeyForProvider: (params: {
       provider: string;

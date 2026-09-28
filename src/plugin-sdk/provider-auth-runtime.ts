@@ -267,6 +267,8 @@ type ResolveApiKeyForProvider =
   typeof import("../agents/model-auth.js").resolveApiKeyForProviderCore;
 type GetRuntimeAuthForModel =
   typeof import("../plugins/runtime/runtime-model-auth.runtime.js").getRuntimeAuthForModelCore;
+type GetReplyUsage =
+  typeof import("../plugins/runtime/runtime-model-auth.runtime.js").getReplyUsageCore;
 type RuntimeModelAuthModule = typeof import("../plugins/runtime/runtime-model-auth.runtime.js");
 const RUNTIME_MODEL_AUTH_CANDIDATES = [
   "./runtime-model-auth.runtime",
@@ -318,4 +320,12 @@ export async function getRuntimeAuthForModel(
   const { getRuntimeAuthForModelCore: getRuntimeAuthForModelLocal } =
     await loadRuntimeModelAuthModule();
   return getRuntimeAuthForModelLocal(params);
+}
+
+/** Read sanitized provider usage bound to one exact accepted reply run. */
+export async function getReplyUsage(
+  params: Parameters<GetReplyUsage>[0],
+): Promise<Awaited<ReturnType<GetReplyUsage>>> {
+  const { getReplyUsageCore } = await loadRuntimeModelAuthModule();
+  return getReplyUsageCore(params);
 }

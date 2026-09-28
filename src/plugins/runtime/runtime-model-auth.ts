@@ -28,6 +28,10 @@ export function createRuntimeModelAuth({
     loadModelAuthRuntime,
     (runtime) => runtime.resolveProviderRuntimeApiKey,
   );
+  const getReplyUsage = createLazyRuntimeMethod(
+    loadModelAuthRuntime,
+    (runtime) => runtime.getReplyUsageCore,
+  );
   return {
     resolveProviderIdForAuth,
     ensureAuthProfileStore,
@@ -46,6 +50,7 @@ export function createRuntimeModelAuth({
         cfg: params.cfg,
         workspaceDir: params.workspaceDir,
       }),
+    getReplyUsage: (params) => getReplyUsage(params),
     resolveApiKeyForProvider: (params) =>
       resolveApiKeyForProvider({
         provider: params.provider,

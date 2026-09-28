@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearSessionSuccessfulAuthBindingsForTest,
   invalidateSessionSuccessfulAuthBinding,
+  readReplySuccessfulAuthBinding,
   readSessionSuccessfulAuthBinding,
   recordSessionSuccessfulAuthBinding,
 } from "./session-successful-auth-binding.js";
@@ -30,6 +31,25 @@ describe("session successful auth binding", () => {
       authProfileId: "openai:shared-winner",
       authFingerprint: "winner-fingerprint",
     });
+  });
+
+  it("requires the exact accepted run for reply usage", () => {
+    recordSessionSuccessfulAuthBinding({
+      ...identity,
+      runId: "run-one",
+      binding: {
+        authProfileId: "openai:shared-winner",
+        authFingerprint: "winner-fingerprint",
+      },
+    });
+    expect(readReplySuccessfulAuthBinding({ ...identity, runId: "run-one" })).toMatchObject({
+      runId: "run-one",
+      authFingerprint: "winner-fingerprint",
+    });
+    expect(readReplySuccessfulAuthBinding({ ...identity, runId: "run-other" })).toBeUndefined();
+    expect(
+      readReplySuccessfulAuthBinding({ ...identity, runId: "run-one", sessionId: "reset" }),
+    ).toBeUndefined();
   });
 
   it("fails closed without a successful binding or after identity and route changes", () => {

@@ -179,7 +179,10 @@ export async function getReplyUsageCore(params: {
   if (!sampledFingerprint || resolvedProfile.provider.trim() !== successful.provider) {
     return unavailableReplyUsage(params.sessionKey, "auth-unavailable");
   }
-  if (!isCurrent()) return unavailableReplyUsage(params.sessionKey, "credential-changed");
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new Error("reply usage authority changed");
+  };
+  assertCurrent();
   const exactAuth = {
     provider: successful.provider,
     token: resolvedProfile.apiKey,
@@ -211,6 +214,7 @@ export async function getReplyUsageCore(params: {
     lifecycleRevision: successful.lifecycleRevision,
     providerId: successful.provider,
     authScope: personal ? "personal" : "shared",
+    assertCurrent,
   });
   if (!isCurrent()) return unavailableReplyUsage(params.sessionKey, "credential-changed");
   if (sampledFingerprint !== successful.authFingerprint) {

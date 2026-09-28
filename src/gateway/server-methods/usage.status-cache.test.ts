@@ -231,7 +231,7 @@ describe("usage.status provider usage cache", () => {
     expect(mocks.loadProviderUsageSummary).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps exact credential scope verified while exposing an account mismatch", async () => {
+  it("fails closed without quota values on a provider account mismatch", async () => {
     mocks.loadProviderUsageSummary.mockResolvedValue({
       updatedAt: now,
       providers: [
@@ -260,7 +260,8 @@ describe("usage.status provider usage cache", () => {
     });
     expect(result).toMatchObject({
       sessionScope: {
-        status: "verified",
+        status: "unavailable",
+        reason: "account-binding-mismatch",
         requestedSessionKey: "agent:main:main",
         effectiveSessionKey: "agent:main:main",
         credential: { consistency: "match" },
@@ -268,7 +269,8 @@ describe("usage.status provider usage cache", () => {
       },
       cache: { status: "fresh" },
     });
-    expect(result.providers[0]?.accountEmail).toBeUndefined();
+    expect(result.providers).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("quota-owner@example.test");
   });
 
   it("marks a scoped cached sample stale while its exact-credential refresh runs", async () => {

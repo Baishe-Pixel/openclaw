@@ -33,6 +33,8 @@ type UsageSummaryOptions = {
   config?: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
+  /** Live caller authority checked immediately before provider I/O. */
+  assertCurrent?: () => void;
 };
 
 async function fetchProviderUsageSnapshot(params: {
@@ -144,6 +146,7 @@ export async function loadProviderUsageSummary(
               })
             )[0];
           signal.throwIfAborted();
+          opts.assertCurrent?.();
           if (authError) {
             const message = formatErrorMessage(authError);
             return failureSnapshot(provider, message.trim() || "Auth failed");
@@ -161,6 +164,7 @@ export async function loadProviderUsageSummary(
             signal,
             fetchFn: (input, init) => {
               signal.throwIfAborted();
+              opts.assertCurrent?.();
               const callerSignal =
                 init?.signal === undefined && input instanceof Request
                   ? input.signal

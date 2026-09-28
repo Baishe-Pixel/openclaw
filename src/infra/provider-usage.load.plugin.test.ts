@@ -150,6 +150,25 @@ describe("provider-usage.load plugin boundary", () => {
     expect(pluginCall.context?.timeoutMs).toBe(5_000);
   });
 
+  it("rechecks live authority before entering the provider plugin", async () => {
+    const assertCurrent = vi.fn(() => {
+      throw new Error("authority revoked");
+    });
+    const result = await loadProviderUsageSummary({
+      now: usageNow,
+      auth: [{ provider: "openai", token: "codex-token" }],
+      fetch: vi.fn() as unknown as typeof fetch,
+      env: {},
+      assertCurrent,
+    });
+
+    expect(assertCurrent).toHaveBeenCalledOnce();
+    expect(resolveProviderUsageSnapshotWithPluginMock).not.toHaveBeenCalled();
+    expect(result.providers).toEqual([
+      expect.objectContaining({ provider: "openai", error: "authority revoked" }),
+    ]);
+  });
+
   it("routes synthetic Codex usage through the Codex hook while preserving OpenAI context", async () => {
     resolveProviderUsageSnapshotWithPluginMock.mockResolvedValueOnce({
       provider: "openai",

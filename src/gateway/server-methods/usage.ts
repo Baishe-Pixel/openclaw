@@ -309,8 +309,11 @@ async function loadSessionCredentialUsage(
       scope.assertCurrent?.();
       return unavailableSessionCredentialUsage("auth-unavailable", sessionKey, successful);
     }
-    personalAuthority?.assertCurrent();
-    scope.assertCurrent?.();
+    const assertCurrent = () => {
+      personalAuthority?.assertCurrent();
+      scope.assertCurrent?.();
+    };
+    assertCurrent();
     const exactAuth = {
       provider: providerId,
       token: resolvedProfile.apiKey,
@@ -344,9 +347,9 @@ async function loadSessionCredentialUsage(
       providerId,
       authScope: personal ? "personal" : "shared",
       coldRead,
+      assertCurrent,
     });
-    personalAuthority?.assertCurrent();
-    scope.assertCurrent?.();
+    assertCurrent();
     if (sampledCredentialFingerprint !== successful.authFingerprint) {
       const replaced = replaceSessionSuccessfulAuthFingerprint({
         sessionKey: successful.sessionKey,

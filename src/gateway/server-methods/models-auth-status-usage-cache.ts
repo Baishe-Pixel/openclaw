@@ -140,6 +140,7 @@ function scheduleProviderUsageRefresh(
     resultRequestedSessionKey?: string;
     resultEffectiveSessionKey?: string;
     authScope?: "personal" | "shared";
+    assertCurrent?: () => void;
   },
 ): Promise<UsageSummary> {
   const cacheKey = JSON.stringify([
@@ -168,6 +169,7 @@ function scheduleProviderUsageRefresh(
       ...(params.exactAuth ? { auth: [params.exactAuth] } : {}),
       config: params.configRef,
       timeoutMs: PROVIDER_USAGE_TIMEOUT_MS,
+      assertCurrent: params.assertCurrent,
     })
       .then((freshUsage) => {
         const scopedProviders = params.resultCredentialFingerprint
@@ -195,19 +197,20 @@ function scheduleProviderUsageRefresh(
               ? ("match" as const)
               : ("mismatch" as const)
             : ("unavailable" as const);
-        // Exact successful-credential proof is independent from provider account ownership.
-        // OpenAI consumers must additionally require account.consistency=match; providers
-        // without an account identity (for example balance APIs) may still use the exact
-        // credential-scoped result.
-        const scopeStatus = "verified" as const;
+        // A known provider-account conflict must never publish quota values. Providers
+        // without account identity may still expose exact credential-scoped results and
+        // let clients apply their stricter provider-specific policy.
+        const accountMismatch = accountConsistency === "mismatch";
+        const scopeStatus = accountMismatch ? ("unavailable" as const) : ("verified" as const);
         const scopedUsage = params.resultCredentialFingerprint
           ? {
               ...freshUsage,
               authScope: params.authScope,
               credentialFingerprint: params.resultCredentialFingerprint,
-              providers: scopedProviders ?? [],
+              providers: accountMismatch ? [] : (scopedProviders ?? []),
               sessionScope: {
                 status: scopeStatus,
+                ...(accountMismatch ? { reason: "account-binding-mismatch" as const } : {}),
                 requestedSessionKey: params.resultRequestedSessionKey ?? "",
                 effectiveSessionKey: params.resultEffectiveSessionKey ?? "",
                 authScope: params.authScope,
@@ -289,6 +292,7 @@ type ProviderUsageCacheParams = {
   resultRequestedSessionKey?: string;
   resultEffectiveSessionKey?: string;
   authScope?: "personal" | "shared";
+  assertCurrent?: () => void;
 };
 
 function resolveProviderUsageCacheRead(params: ProviderUsageCacheParams) {
@@ -333,6 +337,7 @@ function resolveProviderUsageCacheRead(params: ProviderUsageCacheParams) {
       resultRequestedSessionKey: params.resultRequestedSessionKey,
       resultEffectiveSessionKey: params.resultEffectiveSessionKey,
       authScope: params.authScope,
+      assertCurrent: params.assertCurrent,
     },
   };
 }
@@ -424,6 +429,7 @@ export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
   authScope: "personal" | "shared";
   coldRead?: "refresh-marker";
   now?: number;
+  assertCurrent?: () => void;
 }): Promise<UsageSummary> {
   const now = options.now ?? Date.now();
   const params: ProviderUsageCacheParams = {
@@ -449,6 +455,7 @@ export async function loadCredentialUsageStatusStaleWhileRevalidate(options: {
     resultRequestedSessionKey: options.sessionKey,
     resultEffectiveSessionKey: options.sessionKey,
     authScope: options.authScope,
+    assertCurrent: options.assertCurrent,
   };
   const { matching, needsRefresh, refreshParams } = resolveProviderUsageCacheRead(params);
   if (matching && !needsRefresh) {
